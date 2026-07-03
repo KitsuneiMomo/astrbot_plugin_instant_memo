@@ -1,0 +1,31 @@
+{
+  "poll_interval": {
+    "type": "int",
+    "description": "定时任务检查间隔(秒)",
+    "hint": "后台循环检查定时任务的频率。默认 15 秒。",
+    "obvious_hint": true,
+    "default": 15
+  },
+  "allow_global_memo": {
+    "type": "bool",
+    "description": "允许全局状态备忘录",
+    "hint": "如果开启，AI 可以创建对所有用户都生效的状态/人设备忘录（关闭则仅在当前会话生效）。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "trigger_mode": {
+    "type": "string",
+    "description": "触发模式",
+    "hint": "选择如何触发备忘录操作：工具调用模式 (Tool Call) 或 XML 标签模式 (XML Tag) 。",
+    "obvious_hint": true,
+    "default": "tool",
+    "options": [
+      "tool",
+      "xml"
+    ],
+    "labels": [
+      "工具调用模式 (Tool Call)",
+      "XML 标签模式 (XML Tag)"
+    ]
+  }
+}
