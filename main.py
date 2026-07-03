@@ -459,7 +459,7 @@ class AIMemoPlugin(Star):
         await self._save_data()
         
         target_str = "全局" if is_global else "当前会话"
-        return f"已成功设置{target_str}状态备忘录：'{content}'，将在 {minutes_later} 分钟后自动过期。ID 为: {memo_id}"
+        return f"[后台隐蔽消息] 已成功记录{target_str}状态备忘录。请【严格隐秘存储】，完全以人设身份正常回复用户，【严禁】在回复中向用户暴露备忘录内容、备忘ID或输出系统确认话术！"
 
     @llm_tool(name="delete_status_memo")
     async def delete_status_memo(self, event: AstrMessageEvent, memo_id: str) -> str:
@@ -469,7 +469,7 @@ class AIMemoPlugin(Star):
         if m_id_clean in memos_data:
             content = memos_data.pop(m_id_clean)["content"]
             await self._save_data()
-            return f"已成功删除状态备忘录：'{content}'。"
+            return f"[后台隐蔽消息] 已成功删除状态备忘录：'{content}'。请保持人设回复用户。"
             
         matched_id = None
         for real_id in memos_data:
@@ -479,9 +479,9 @@ class AIMemoPlugin(Star):
         if matched_id:
             content = memos_data.pop(matched_id)["content"]
             await self._save_data()
-            return f"已成功匹配短 ID 并删除状态备忘录：'{content}'。"
+            return f"[后台隐蔽消息] 已成功删除状态备忘录：'{content}'。请保持人设回复用户。"
             
-        return f"未找到 ID 为 '{memo_id}' 的状态备忘录，删除失败。"
+        return f"[后台隐蔽消息] 未找到 ID 为 '{memo_id}' 的状态备忘录。"
 
     # ========================== 工具 2：主动定时任务 ==========================
 
@@ -531,7 +531,7 @@ class AIMemoPlugin(Star):
         
         type_cn = {"one_off": "单次定时", "daily": "每日定时", "interval": "周期性时间间隔循环"}
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_time))
-        return f"已成功设立主动任务（{type_cn[t_type]}）。将在北京时间 {time_str} 进行首次触发（前1分钟启动生成），任务设定：'{task_description}'。任务 ID: {task_id}"
+        return f"[后台隐蔽消息] 已成功设立主动任务（{type_cn[t_type]}）。将在 {time_str} 首次触发。请完全以人设身份正常回复用户，【严禁】在回复中向用户暴露任务内容或系统确认话术！"
 
     @llm_tool(name="delete_active_task")
     async def delete_active_task(self, event: AstrMessageEvent, task_id: str) -> str:
@@ -541,7 +541,7 @@ class AIMemoPlugin(Star):
         if t_id_clean in tasks_data:
             desc = tasks_data.pop(t_id_clean)["task_description"]
             await self._save_data()
-            return f"已成功删除定时/循环任务：'{desc}'。"
+            return f"[后台隐蔽消息] 已成功删除定时任务：'{desc}'。请保持人设回复用户。"
             
         matched_id = None
         for real_id in tasks_data:
@@ -551,9 +551,9 @@ class AIMemoPlugin(Star):
         if matched_id:
             desc = tasks_data.pop(matched_id)["task_description"]
             await self._save_data()
-            return f"已成功匹配短 ID 并删除定时/循环任务：'{desc}'。"
+            return f"[后台隐蔽消息] 已成功删除定时任务：'{desc}'。请保持人设回复用户。"
             
-        return f"未找到 ID 为 '{task_id}' 的定时/循环任务，删除失败。"
+        return f"[后台隐蔽消息] 未找到 ID 为 '{task_id}' 的定时任务。"
 
     @llm_tool(name="set_active_reminder")
     async def set_active_reminder(self, event: AstrMessageEvent, task_description: str, minutes_later: int, exact_message_to_send: str = "") -> str:
@@ -586,7 +586,7 @@ class AIMemoPlugin(Star):
         await self._save_data()
         
         scope_str = "全局" if is_global else "当前会话"
-        return f"已成功注册关键词监听搭话任务（{scope_str}）。触发词: '{keyword}'，触发器 ID: {trigger_id}"
+        return f"[后台隐蔽消息] 已成功注册关键词监听任务（{scope_str}，触发词: '{keyword}'）。请完全以人设身份正常回复用户，【严禁】泄漏监听设置。"
 
     @llm_tool(name="delete_keyword_trigger")
     async def delete_keyword_trigger(self, event: AstrMessageEvent, trigger_id: str) -> str:
@@ -596,7 +596,7 @@ class AIMemoPlugin(Star):
         if tg_id_clean in triggers:
             keyword = triggers.pop(tg_id_clean)["keyword"]
             await self._save_data()
-            return f"已成功删除关键词 '{keyword}' 的搭话监听器。"
+            return f"[后台隐蔽消息] 已成功删除关键词 '{keyword}' 的搭话监听器。"
             
         matched_id = None
         for real_id in triggers:
@@ -606,9 +606,9 @@ class AIMemoPlugin(Star):
         if matched_id:
             keyword = triggers.pop(matched_id)["keyword"]
             await self._save_data()
-            return f"已成功匹配短 ID 并删除关键词 '{keyword}' 的搭话监听器。"
+            return f"[后台隐蔽消息] 已成功删除关键词 '{keyword}' 的搭话监听器。"
             
-        return f"未找到 ID 为 '{trigger_id}' 的关键词搭话监听任务，删除失败。"
+        return f"[后台隐蔽消息] 未找到 ID 为 '{trigger_id}' 的关键词搭话监听任务。"
 
     # ========================== 核心事件拦截：注入 System Prompt ==========================
 
@@ -695,11 +695,21 @@ class AIMemoPlugin(Star):
                 "\n======================================="
             )
 
+        privacy_instruction = (
+            "=== [核心保密与人设原则] ===\n"
+            "1. AI备忘录/定时任务/关键词触发器是你后台的【私密记事本】。\n"
+            "2. 当你在备忘录中记下信息（如猜数字游戏的目标数字、暗号、秘密状态等）时，【绝对不要】在给用户的回复中泄漏备忘的具体内容、答案、条目ID，也不要输出'已为您记下'、'成功设置备忘'等机械确认话术！\n"
+            "3. 记下备忘后，请完全以你的人设角色自然地回复用户（例如玩猜数字时，你只需自然回答：'好呀，我已经记好数字了，你来猜吧！'，决不能在回复中把数字说出来）。\n"
+            "======================================="
+        )
+        memo_text_parts.append(privacy_instruction)
+
         if self.trigger_mode == "xml":
             xml_instruction = (
                 "=== [AI备忘录系统 XML 交互指南] ===\n"
-                "你可以通过输出特殊的 XML 标签 `<ai_memo>` 管理备忘录、定时任务和关键词搭话任务。格式如下：\n"
-                "1. 状态备忘录：<ai_memo action=\"set_status\" minutes_later=\"分钟数\" is_global=\"true|false\">状态内容</ai_memo>\n"
+                "你可以通过输出特殊的 XML 标签 `<ai_memo>` 管理备忘录、定时任务和关键词搭话任务。标签会被系统提取并自动从回复中擦除，用户无法看到。\n"
+                "格式如下：\n"
+                "1. 状态备忘录：<ai_memo action=\"set_status\" minutes_later=\"分钟数\" is_global=\"true|false\">状态/隐秘内容</ai_memo>\n"
                 "2. 删状态备忘：<ai_memo action=\"delete_status\" memo_id=\"备忘录ID或前8位短ID\" />\n"
                 "3. 定时/循环：<ai_memo action=\"set_task\" type=\"one_off|daily|interval\" value=\"触发时间参数\" history_limit=\"条数\">任务设定描述</ai_memo>\n"
                 "4. 删定时任务：<ai_memo action=\"delete_task\" task_id=\"任务ID或前8位短ID\" />\n"
@@ -754,19 +764,19 @@ class AIMemoPlugin(Star):
 
                     try:
                         ret_msg = await self._execute_xml_action(event, action, attrs, content)
-                        if ret_msg:
-                            parts.append(ret_msg)
+                        logger.info(f"[InstantMemo] 后台静默执行 XML 备忘录动作 ({action}): {ret_msg}")
                     except Exception as e:
                         logger.error(f"[InstantMemo] XML action {action} failed: {e}")
-                        parts.append(f"[备忘录操作失败: {e}]")
 
                     last_idx = end
 
                 if last_idx < len(text):
                     parts.append(text[last_idx:])
 
-                comp.text = "".join(parts)
-                new_chain.append(comp)
+                cleaned_text = "".join(parts)
+                if cleaned_text.strip():
+                    comp.text = cleaned_text
+                    new_chain.append(comp)
             else:
                 new_chain.append(comp)
 
