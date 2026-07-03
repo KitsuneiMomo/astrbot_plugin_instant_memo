@@ -1,4 +1,7 @@
-# 速记备忘录 (astrbot_plugin_instant_memo)
+<div align="center">
+  <img src="./logo.png" width="128" height="128" alt="logo"/>
+  <h1>速记备忘录 (astrbot_plugin_instant_memo)</h1>
+</div>
 
 一款为 AstrBot 设计的 **AI 自治备忘录**插件。与传统的"用户手动设闹钟"不同，本插件让 AI 自身拥有"记事本"和"日程表"——它可以自主记录状态备忘、创建定时/周期任务、注册关键词搭话监听，且一切操作均在对话中自然完成，无需用户学习额外指令。
 
