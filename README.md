@@ -7,6 +7,8 @@
 
 同时，本插件提供了一个现代化的前端管理面板，支持实时对条目进行可视化增删改查。
 
+![聊天使用示例](./example.png)
+
 ---
 
 ## ![diff](https://img.icons8.com/material-outlined/24/idea.png) 与传统备忘录/定时任务插件有何不同？
