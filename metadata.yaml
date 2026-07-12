@@ -2,6 +2,6 @@ name: astrbot_plugin_instant_memo
 display_name: "速记备忘录"
 desc: "AI自我备忘录与主动定时提醒插件，支持状态备忘、定时/周期任务、关键词搭话，同时提供 Tool Call 与 XML Tag 双触发模式"
 short_desc: "AI备忘录 · 定时提醒 · 关键词搭话"
-version: v1.1.0
+version: v1.2
 author: "kitsuneimomo"
 repo: https://github.com/KitsuneiMomo/astrbot_plugin_instant_memo

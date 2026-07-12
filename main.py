@@ -5,6 +5,7 @@ import asyncio
 import uuid
 import re
 from datetime import datetime, timedelta
+from typing import Optional
 
 from astrbot.api import logger
 from astrbot.api.all import *
@@ -27,7 +28,7 @@ def get_next_daily_timestamp(time_str: str) -> float:
         target_dt += timedelta(days=1)
     return target_dt.timestamp()
 
-@register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.1.0")
+@register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.2")
 class AIMemoPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -56,9 +57,43 @@ class AIMemoPlugin(Star):
         # 在 __init__ 中直接启动后台异步轮询任务是正确的
         self.poll_task = asyncio.create_task(self._polling_loop())
 
+        # 注册前端 Web API
+        context.register_web_api(
+            "/astrbot_plugin_instant_memo/get_data",
+            self.web_get_data,
+            ["GET"],
+            "获取备忘录条目与当前设置"
+        )
+        context.register_web_api(
+            "/astrbot_plugin_instant_memo/save_config",
+            self.web_save_config,
+            ["POST"],
+            "保存备忘录插件配置"
+        )
+        context.register_web_api(
+            "/astrbot_plugin_instant_memo/add_item",
+            self.web_add_item,
+            ["POST"],
+            "手动添加备忘条目"
+        )
+        context.register_web_api(
+            "/astrbot_plugin_instant_memo/update_item",
+            self.web_update_item,
+            ["POST"],
+            "手动修改备忘条目"
+        )
+        context.register_web_api(
+            "/astrbot_plugin_instant_memo/delete_item",
+            self.web_delete_item,
+            ["POST"],
+            "删除指定备忘条目"
+        )
+
     def on_config_update(self, config: dict):
         """热更新插件配置"""
-        self.config = config or {}
+        if config and config is not self.config:
+            for k, v in config.items():
+                self.config[k] = v
         self.poll_interval = int(self.config.get("poll_interval", 15))
         self.allow_global_memo = bool(self.config.get("allow_global_memo", True))
         self.trigger_mode = self.config.get("trigger_mode", "tool")
@@ -444,6 +479,9 @@ class AIMemoPlugin(Star):
     
     @llm_tool(name="set_status_memo")
     async def set_status_memo(self, event: AstrMessageEvent, content: str, minutes_later: int, is_global: bool) -> str:
+        if not self._is_allowed(event, "add", "status_memo"):
+            return "[后台隐蔽消息] 新增状态备忘的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
+
         if is_global and not self.allow_global_memo:
             is_global = False
             
@@ -463,6 +501,9 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_status_memo")
     async def delete_status_memo(self, event: AstrMessageEvent, memo_id: str) -> str:
+        if not self._is_allowed(event, "delete", "status_memo"):
+            return "[后台隐蔽消息] 删除状态备忘的操作已被管理员禁用。请保持人设回复用户。"
+
         m_id_clean = memo_id.strip()
         memos_data = self.data.setdefault("status_memos", {})
         
@@ -487,6 +528,24 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="set_scheduled_task")
     async def set_scheduled_task(self, event: AstrMessageEvent, task_description: str, task_type: str, schedule_value: str, context_history_limit: int = 5) -> str:
+        """
+        设立一个定时提醒或循环任务（主动给用户发消息）。
+        
+        Args:
+            task_description (string): 定时提醒的任务具体内容，AI需要根据此描述给用户发送相应的提醒消息。
+            task_type (string): 任务类型。必须为 'one_off' (单次定时), 'daily' (每日定时) 或 'interval' (周期循环)。
+            schedule_value (string): 触发时间参数。
+                - 当 task_type 为 'one_off' 时，value 必须为整数代表分钟数，如 '30' 表示30分钟后。
+                - 当 task_type 为 'daily' 时，value 必须是 HH:MM 格式，例如 '12:30' 表示每天中午12点30分。
+                - 当 task_type 为 'interval' 时，value 必须为整数代表循环间隔分钟数，如 '60' 表示每60分钟一次。
+            context_history_limit (int, optional): 触发时携带的前文历史条数，默认 5。
+        """
+        if not self._is_allowed(event, "add", "task"):
+            return "[后台隐蔽消息] 创建定时提醒任务的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
+
+        if context_history_limit == 5:
+            context_history_limit = self.config.get("context_history_limit", 5)
+
         task_id = str(uuid.uuid4())
         current_time = time.time()
         
@@ -497,13 +556,36 @@ class AIMemoPlugin(Star):
         trigger_time = 0.0
         val = schedule_value.strip()
         
+        def parse_minutes(value_str: str) -> Optional[int]:
+            match = re.search(r'\d+', value_str)
+            return int(match.group(0)) if match else None
+
         if t_type == "one_off":
             try:
                 mins = int(val)
                 trigger_time = current_time + mins * 60
             except ValueError:
-                return "错误：对于 one_off 单次定时，schedule_value 必须为整数代表分钟数（如 '30'）。"
+                mins = parse_minutes(val)
+                if mins is not None:
+                    trigger_time = current_time + mins * 60
+                    val = str(mins)
+                else:
+                    return "错误：对于 one_off 单次定时，schedule_value 必须为整数代表分钟数（如 '30'）。"
         elif t_type == "daily":
+            if ":" not in val:
+                match = re.search(r'(\d{1,2})[:：点\s](\d{2})', val)
+                if match:
+                    hours = int(match.group(1))
+                    minutes = int(match.group(2))
+                    if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                        val = f"{hours:02d}:{minutes:02d}"
+                else:
+                    match_single = re.search(r'^(\d{1,2})(?:点|时)?$', val)
+                    if match_single:
+                        hours = int(match_single.group(1))
+                        if 0 <= hours <= 23:
+                            val = f"{hours:02d}:00"
+            
             if ":" not in val:
                 return "错误：对于 daily 每日定时，schedule_value 必须是 HH:MM 格式，例如 '12:00'。"
             trigger_time = get_next_daily_timestamp(val)
@@ -512,7 +594,12 @@ class AIMemoPlugin(Star):
                 mins = int(val)
                 trigger_time = current_time + mins * 60
             except ValueError:
-                return "错误：对于 interval 间隔循环，schedule_value 必须为整数代表间隔分钟（如 '60'）。"
+                mins = parse_minutes(val)
+                if mins is not None:
+                    trigger_time = current_time + mins * 60
+                    val = str(mins)
+                else:
+                    return "错误：对于 interval 间隔循环，schedule_value 必须为整数代表间隔分钟（如 '60'）。"
                 
         target_umo = event.unified_msg_origin
         
@@ -535,6 +622,9 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_active_task")
     async def delete_active_task(self, event: AstrMessageEvent, task_id: str) -> str:
+        if not self._is_allowed(event, "delete", "task"):
+            return "[后台隐蔽消息] 删除定时提醒任务的操作已被管理员禁用。请保持人设回复用户。"
+
         t_id_clean = task_id.strip()
         tasks_data = self.data.setdefault("tasks", {})
         
@@ -570,6 +660,12 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="set_keyword_trigger_task")
     async def set_keyword_trigger_task(self, event: AstrMessageEvent, keyword: str, task_description: str, context_history_limit: int = 5, is_global: bool = True) -> str:
+        if not self._is_allowed(event, "add", "keyword_trigger"):
+            return "[后台隐蔽消息] 创建关键词搭话监听的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
+
+        if context_history_limit == 5:
+            context_history_limit = self.config.get("context_history_limit", 5)
+
         trigger_id = str(uuid.uuid4())
         if is_global and not self.allow_global_memo:
             is_global = False
@@ -590,6 +686,9 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_keyword_trigger")
     async def delete_keyword_trigger(self, event: AstrMessageEvent, trigger_id: str) -> str:
+        if not self._is_allowed(event, "delete", "keyword_trigger"):
+            return "[后台隐蔽消息] 删除关键词搭话监听的操作已被管理员禁用。请保持人设回复用户。"
+
         tg_id_clean = trigger_id.strip()
         triggers = self.data.setdefault("keyword_triggers", {})
         
@@ -711,7 +810,7 @@ class AIMemoPlugin(Star):
                 "格式如下：\n"
                 "1. 状态备忘录：<ai_memo action=\"set_status\" minutes_later=\"分钟数\" is_global=\"true|false\">状态/隐秘内容</ai_memo>\n"
                 "2. 删状态备忘：<ai_memo action=\"delete_status\" memo_id=\"备忘录ID或前8位短ID\" />\n"
-                "3. 定时/循环：<ai_memo action=\"set_task\" type=\"one_off|daily|interval\" value=\"触发时间参数\" history_limit=\"条数\">任务设定描述</ai_memo>\n"
+                "3. 定时/循环：<ai_memo action=\"set_task\" type=\"one_off|daily|interval\" value=\"具体数值或时间\" history_limit=\"条数\">任务设定描述</ai_memo>（注意：当 type 为 one_off 或 interval 时，value 必须为整数代表分钟数，如 \"30\"；当 type 为 daily 时，value 必须为 HH:MM 格式，如 \"12:30\"）\n"
                 "4. 删定时任务：<ai_memo action=\"delete_task\" task_id=\"任务ID或前8位短ID\" />\n"
                 "5. 监听关键词：<ai_memo action=\"set_keyword\" keyword=\"触发词\" history_limit=\"条数\" is_global=\"true|false\">接话语气和任务设定</ai_memo>\n"
                 "6. 删关键监听：<ai_memo action=\"delete_keyword\" trigger_id=\"触发器ID或前8位短ID\" />\n"
@@ -837,20 +936,34 @@ class AIMemoPlugin(Star):
             return
             
         for tg_id, trigger in list(triggers.items()):
-            keyword = trigger.get("keyword", "")
-            if keyword and keyword in msg_str:
+            keyword_str = trigger.get("keyword", "")
+            if not keyword_str:
+                continue
+                
+            import re
+            keywords = [k.strip() for k in re.split(r'[\s,，;；]+', keyword_str) if k.strip()]
+            
+            matched_keyword = None
+            for kw in keywords:
+                if kw in msg_str:
+                    matched_keyword = kw
+                    break
+                    
+            if matched_keyword:
                 target_umo = trigger.get("target_umo", "GLOBAL")
                 if target_umo != "GLOBAL" and target_umo != umo:
                     continue
                     
-                asyncio.create_task(self._execute_keyword_trigger(event, trigger))
+                trigger_copy = trigger.copy()
+                trigger_copy["matched_keyword"] = matched_keyword
+                asyncio.create_task(self._execute_keyword_trigger(event, trigger_copy))
                 event.stop_event()
                 break
 
     async def _execute_keyword_trigger(self, event: AstrMessageEvent, trigger: dict):
         umo = event.unified_msg_origin
         desc = trigger["task_description"]
-        keyword = trigger["keyword"]
+        keyword = trigger.get("matched_keyword", trigger.get("keyword", ""))
         history_limit = trigger.get("context_history_limit", 5)
         
         try:
@@ -1028,3 +1141,318 @@ class AIMemoPlugin(Star):
             logger.error(f"[InstantMemo] 定时任务 {task_id} 下推异常, umo: {umo}, err: {e}")
         finally:
             await self._reschedule_task(task_id, task)
+
+    def _is_allowed(self, event: AstrMessageEvent, action_type: str, item_type: str) -> bool:
+        """
+        检查是否允许操作。
+        action_type: 'add', 'update', 'delete'
+        item_type: 'status_memo', 'task', 'keyword_trigger'
+        """
+        if not event:
+            return True
+            
+        # 1. 验证群聊限制
+        group_id = event.get_group_id()
+        if group_id:
+            group_str = str(group_id)
+            filter_mode = self.config.get("group_filter_mode", "all")
+            group_list_str = self.config.get("group_list", "")
+            
+            # 解析群号列表
+            import re
+            configured_groups = set(re.split(r'[\s,，;；\n\r]+', group_list_str.strip()))
+            configured_groups = {g for g in configured_groups if g}
+            
+            if filter_mode == "whitelist":
+                if group_str not in configured_groups:
+                    logger.warning(f"[InstantMemo] 群聊 {group_str} 不在白名单中，拒绝操作。")
+                    return False
+            elif filter_mode == "blacklist":
+                if group_str in configured_groups:
+                    logger.warning(f"[InstantMemo] 群聊 {group_str} 在黑名单中，拒绝操作。")
+                    return False
+                    
+        # 2. 验证操作权限
+        if action_type == "add" and not self.config.get("ai_allow_add", True):
+            logger.warning("[InstantMemo] AI 新增操作被禁用。")
+            return False
+        if action_type == "update" and not self.config.get("ai_allow_update", True):
+            logger.warning("[InstantMemo] AI 修改操作被禁用。")
+            return False
+        if action_type == "delete" and not self.config.get("ai_allow_delete", True):
+            logger.warning("[InstantMemo] AI 删除操作被禁用。")
+            return False
+            
+        # 3. 验证条目类型权限
+        if item_type == "status_memo" and not self.config.get("enable_status_memo_ai", True):
+            logger.warning("[InstantMemo] 状态备忘录已被 AI 禁用。")
+            return False
+        if item_type == "task" and not self.config.get("enable_task_ai", True):
+            logger.warning("[InstantMemo] 定时任务已被 AI 禁用。")
+            return False
+        if item_type == "keyword_trigger" and not self.config.get("enable_keyword_trigger_ai", True):
+            logger.warning("[InstantMemo] 关键词搭话已被 AI 禁用。")
+            return False
+            
+        return True
+
+    async def web_get_data(self):
+        from quart import jsonify
+        response = {"status": "success", "config": self.config}
+        response.update(self.data)
+        return jsonify(response)
+
+    async def web_save_config(self):
+        from quart import request, jsonify
+        try:
+            data = await request.json
+            if not data or not isinstance(data, dict):
+                return jsonify({"status": "error", "message": "Invalid request body"}), 400
+            for k, v in data.items():
+                self.config[k] = v
+            if hasattr(self.config, "save_config"):
+                self.config.save_config()
+            self.on_config_update(self.config)
+            return jsonify({"status": "success"})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    async def web_add_item(self):
+        from quart import request, jsonify
+        try:
+            req_data = await request.json
+            if not req_data or not isinstance(req_data, dict):
+                return jsonify({"status": "error", "message": "Invalid request body"}), 400
+                
+            item_type = req_data.get("type")
+            if item_type == "status_memo":
+                content = req_data.get("content", "").strip()
+                minutes = int(req_data.get("minutes_later", 60))
+                target_umo = req_data.get("target_umo", "GLOBAL").strip()
+                memo_id = str(uuid.uuid4())
+                expire_time = time.time() + minutes * 60
+                
+                self.data.setdefault("status_memos", {})[memo_id] = {
+                    "content": content,
+                    "expire_timestamp": expire_time,
+                    "target_umo": target_umo
+                }
+                await self._save_data()
+                return jsonify({"status": "success", "id": memo_id})
+                
+            elif item_type == "task":
+                task_desc = req_data.get("task_description", "").strip()
+                task_type = req_data.get("task_type", "one_off").strip().lower()
+                schedule_val = req_data.get("schedule_value", "").strip()
+                context_history_limit = int(req_data.get("context_history_limit", 5))
+                target_umo = req_data.get("target_umo", "GLOBAL").strip()
+                
+                if task_type not in ["one_off", "daily", "interval"]:
+                    return jsonify({"status": "error", "message": "Invalid task type"}), 400
+                    
+                trigger_time = 0.0
+                current_time = time.time()
+                if task_type == "one_off":
+                    try:
+                        mins = int(schedule_val)
+                        trigger_time = current_time + mins * 60
+                    except ValueError:
+                        return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
+                elif task_type == "daily":
+                    if ":" not in schedule_val:
+                        return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
+                    trigger_time = get_next_daily_timestamp(schedule_val)
+                elif task_type == "interval":
+                    try:
+                        mins = int(schedule_val)
+                        trigger_time = current_time + mins * 60
+                    except ValueError:
+                        return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
+                        
+                task_id = str(uuid.uuid4())
+                self.data.setdefault("tasks", {})[task_id] = {
+                    "type": task_type,
+                    "task_description": task_desc,
+                    "target_umo": target_umo,
+                    "context_history_limit": context_history_limit,
+                    "scheduled_time": schedule_val,
+                    "trigger_timestamp": trigger_time,
+                    "status": "pending",
+                    "generated_message": "",
+                    "last_run_timestamp": 0.0
+                }
+                await self._save_data()
+                return jsonify({"status": "success", "id": task_id})
+                
+            elif item_type == "keyword_trigger":
+                keyword = req_data.get("keyword", "").strip()
+                task_desc = req_data.get("task_description", "").strip()
+                context_history_limit = int(req_data.get("context_history_limit", 5))
+                target_umo = req_data.get("target_umo", "GLOBAL").strip()
+                
+                trigger_id = str(uuid.uuid4())
+                self.data.setdefault("keyword_triggers", {})[trigger_id] = {
+                    "keyword": keyword,
+                    "task_description": task_desc,
+                    "target_umo": target_umo,
+                    "context_history_limit": context_history_limit
+                }
+                await self._save_data()
+                return jsonify({"status": "success", "id": trigger_id})
+            
+            else:
+                return jsonify({"status": "error", "message": "Unknown item type"}), 400
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    async def web_update_item(self):
+        from quart import request, jsonify
+        try:
+            req_data = await request.json
+            if not req_data or not isinstance(req_data, dict):
+                return jsonify({"status": "error", "message": "Invalid request body"}), 400
+                
+            item_type = req_data.get("type")
+            item_id = req_data.get("id")
+            update_fields = req_data.get("data", {})
+            
+            if not item_id:
+                return jsonify({"status": "error", "message": "Missing ID"}), 400
+                
+            if item_type == "status_memo":
+                memos = self.data.setdefault("status_memos", {})
+                if item_id not in memos:
+                    return jsonify({"status": "error", "message": "Item not found"}), 404
+                    
+                memo = memos[item_id]
+                if "content" in update_fields:
+                    memo["content"] = update_fields["content"].strip()
+                if "minutes_later" in update_fields:
+                    try:
+                        minutes = int(update_fields["minutes_later"])
+                        memo["expire_timestamp"] = time.time() + minutes * 60
+                    except ValueError:
+                        pass
+                if "target_umo" in update_fields:
+                    memo["target_umo"] = update_fields["target_umo"].strip()
+                    
+                await self._save_data()
+                return jsonify({"status": "success"})
+                
+            elif item_type == "task":
+                tasks = self.data.setdefault("tasks", {})
+                if item_id not in tasks:
+                    return jsonify({"status": "error", "message": "Item not found"}), 404
+                    
+                task = tasks[item_id]
+                if "task_description" in update_fields:
+                    task["task_description"] = update_fields["task_description"].strip()
+                if "target_umo" in update_fields:
+                    task["target_umo"] = update_fields["target_umo"].strip()
+                if "context_history_limit" in update_fields:
+                    try:
+                        task["context_history_limit"] = int(update_fields["context_history_limit"])
+                    except ValueError:
+                        pass
+                if "schedule_value" in update_fields or "task_type" in update_fields:
+                    t_type = update_fields.get("task_type", task.get("type")).strip().lower()
+                    schedule_val = update_fields.get("schedule_value", task.get("scheduled_time")).strip()
+                    
+                    if t_type not in ["one_off", "daily", "interval"]:
+                        return jsonify({"status": "error", "message": "Invalid task type"}), 400
+                        
+                    trigger_time = 0.0
+                    current_time = time.time()
+                    if t_type == "one_off":
+                        try:
+                            mins = int(schedule_val)
+                            trigger_time = current_time + mins * 60
+                        except ValueError:
+                            return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
+                    elif t_type == "daily":
+                        if ":" not in schedule_val:
+                            return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
+                        trigger_time = get_next_daily_timestamp(schedule_val)
+                    elif t_type == "interval":
+                        try:
+                            mins = int(schedule_val)
+                            trigger_time = current_time + mins * 60
+                        except ValueError:
+                            return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
+                            
+                    task["type"] = t_type
+                    task["scheduled_time"] = schedule_val
+                    task["trigger_timestamp"] = trigger_time
+                    task["status"] = "pending"
+                    task["generated_message"] = ""
+                    
+                await self._save_data()
+                return jsonify({"status": "success"})
+                
+            elif item_type == "keyword_trigger":
+                triggers = self.data.setdefault("keyword_triggers", {})
+                if item_id not in triggers:
+                    return jsonify({"status": "error", "message": "Item not found"}), 404
+                    
+                trigger = triggers[item_id]
+                if "keyword" in update_fields:
+                    trigger["keyword"] = update_fields["keyword"].strip()
+                if "task_description" in update_fields:
+                    trigger["task_description"] = update_fields["task_description"].strip()
+                if "context_history_limit" in update_fields:
+                    try:
+                        trigger["context_history_limit"] = int(update_fields["context_history_limit"])
+                    except ValueError:
+                        pass
+                if "target_umo" in update_fields:
+                    trigger["target_umo"] = update_fields["target_umo"].strip()
+                    
+                await self._save_data()
+                return jsonify({"status": "success"})
+                
+            else:
+                return jsonify({"status": "error", "message": "Unknown item type"}), 400
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    async def web_delete_item(self):
+        from quart import request, jsonify
+        try:
+            req_data = await request.json
+            if not req_data or not isinstance(req_data, dict):
+                return jsonify({"status": "error", "message": "Invalid request body"}), 400
+                
+            item_type = req_data.get("type")
+            item_id = req_data.get("id")
+            
+            if not item_id:
+                return jsonify({"status": "error", "message": "Missing ID"}), 400
+                
+            if item_type == "status_memo":
+                memos = self.data.setdefault("status_memos", {})
+                if item_id in memos:
+                    memos.pop(item_id)
+                    await self._save_data()
+                    return jsonify({"status": "success"})
+                return jsonify({"status": "error", "message": "Item not found"}), 404
+                
+            elif item_type == "task":
+                tasks = self.data.setdefault("tasks", {})
+                if item_id in tasks:
+                    tasks.pop(item_id)
+                    await self._save_data()
+                    return jsonify({"status": "success"})
+                return jsonify({"status": "error", "message": "Item not found"}), 404
+                
+            elif item_type == "keyword_trigger":
+                triggers = self.data.setdefault("keyword_triggers", {})
+                if item_id in triggers:
+                    triggers.pop(item_id)
+                    await self._save_data()
+                    return jsonify({"status": "success"})
+                return jsonify({"status": "error", "message": "Item not found"}), 404
+                
+            else:
+                return jsonify({"status": "error", "message": "Unknown item type"}), 400
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500

@@ -27,5 +27,78 @@
       "工具调用模式 (Tool Call)",
       "XML 标签模式 (XML Tag)"
     ]
+  },
+  "ai_allow_add": {
+    "type": "bool",
+    "description": "允许 AI 新增条目",
+    "hint": "是否允许 AI 主动创建任何备忘录、定时任务或关键词搭话。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "ai_allow_update": {
+    "type": "bool",
+    "description": "允许 AI 修改条目",
+    "hint": "是否允许 AI 修改现有的备忘录、定时任务或关键词搭话。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "ai_allow_delete": {
+    "type": "bool",
+    "description": "允许 AI 删除条目",
+    "hint": "是否允许 AI 主动删除现有的备忘录、定时任务或关键词搭话。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "enable_status_memo_ai": {
+    "type": "bool",
+    "description": "允许 AI 使用状态备忘录",
+    "hint": "如果关闭，AI 将不能创建/修改/删除状态/人设备忘录。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "enable_task_ai": {
+    "type": "bool",
+    "description": "允许 AI 使用定时任务",
+    "hint": "如果关闭，AI 将不能创建/修改/删除定时/周期提醒任务。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "enable_keyword_trigger_ai": {
+    "type": "bool",
+    "description": "允许 AI 使用关键词搭话",
+    "hint": "如果关闭，AI 将不能注册/修改/删除关键词搭话。",
+    "obvious_hint": true,
+    "default": true
+  },
+  "group_filter_mode": {
+    "type": "string",
+    "description": "群聊启用过滤模式",
+    "hint": "控制插件在哪些群聊中生效。",
+    "obvious_hint": true,
+    "default": "all",
+    "options": [
+      "all",
+      "whitelist",
+      "blacklist"
+    ],
+    "labels": [
+      "全部群聊启用",
+      "仅在白名单群聊启用",
+      "在黑名单群聊禁用"
+    ]
+  },
+  "group_list": {
+    "type": "string",
+    "description": "群聊白/黑名单列表",
+    "hint": "输入群号，以逗号、空格或换行分隔。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "context_history_limit": {
+    "type": "int",
+    "description": "新建/触发定时任务上下文条数",
+    "hint": "新建或触发定时任务时传递给 AI 的上下文消息数量，用于帮大模型恢复当时聊天语境。默认 5 条。",
+    "obvious_hint": true,
+    "default": 5
   }
 }

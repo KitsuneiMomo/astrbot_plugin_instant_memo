@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>速记备忘录 - 插件管理</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 头部导航栏 -->
+        <header class="app-header">
+            <div class="header-left">
+                <span class="back-btn" id="back-btn">← 返回</span>
+                <h1 class="page-title">速记备忘录</h1>
+                <span class="plugin-version">v1.2</span>
+            </div>
+            <div class="header-right">
+                <div class="tab-nav">
+                    <button class="tab-btn active" data-tab="memos">
+                        <i data-lucide="list-todo" class="tab-icon"></i>
+                        <span>条目管理</span>
+                    </button>
+                    <button class="tab-btn" data-tab="settings">
+                        <i data-lucide="settings" class="tab-icon"></i>
+                        <span>插件设置</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- 主内容区域 -->
+        <main class="app-content">
+            <!-- 运行监控与条目管理视图 -->
+            <section id="view-memos" class="tab-view active">
+                
+                <!-- 状态备忘录卡片 -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-header-title-group">
+                            <i data-lucide="bookmark" class="card-header-icon"></i>
+                            <h2 class="card-title">短期状态与人设备忘录</h2>
+                        </div>
+                        <button class="btn btn-primary" id="add-status-btn">
+                            <i data-lucide="plus" class="btn-icon"></i>
+                            <span>新增备忘录</span>
+                        </button>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="memos-table">
+                            <thead>
+                                <tr>
+                                    <th>备忘内容</th>
+                                    <th>作用域 (会话来源)</th>
+                                    <th>剩余过期时间</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="status-memos-body">
+                                <tr>
+                                    <td colspan="4" class="table-empty">暂无状态备忘录，AI 可以在聊天中自主设定临时状态或在上方手动添加。</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 定时/周期任务卡片 -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-header-title-group">
+                            <i data-lucide="alarm-clock" class="card-header-icon"></i>
+                            <h2 class="card-title">定时计划与周期性提醒</h2>
+                        </div>
+                        <button class="btn btn-primary" id="add-task-btn">
+                            <i data-lucide="plus" class="btn-icon"></i>
+                            <span>新增定时任务</span>
+                        </button>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="memos-table">
+                            <thead>
+                                <tr>
+                                    <th>任务计划描述</th>
+                                    <th>类型</th>
+                                    <th>执行时刻/周期</th>
+                                    <th>目标 Unified MSG Origin (会话ID)</th>
+                                    <th>当前状态</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tasks-body">
+                                <tr>
+                                    <td colspan="6" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 关键词搭话卡片 -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-header-title-group">
+                            <i data-lucide="message-square" class="card-header-icon"></i>
+                            <h2 class="card-title">关键词搭话与主动监听策略</h2>
+                        </div>
+                        <button class="btn btn-primary" id="add-trigger-btn">
+                            <i data-lucide="plus" class="btn-icon"></i>
+                            <span>新增关键词监听</span>
+                        </button>
+                    </div>
+                    <div class="card-body table-responsive">
+                        <table class="memos-table">
+                            <thead>
+                                <tr>
+                                    <th>触发关键词</th>
+                                    <th>触发时大模型回复/搭话策略设定</th>
+                                    <th>作用域范围</th>
+                                    <th>附带上下文条数</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="triggers-body">
+                                <tr>
+                                    <td colspan="5" class="table-empty">暂无关键词监听器，AI 可以在聊天中自主注册或在上方手动添加。</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- 插件设置视图 -->
+            <section id="view-settings" class="tab-view">
+                <form id="config-form" onsubmit="return false;">
+                    <div class="settings-tab-layout">
+                        <!-- 左侧子选项卡 -->
+                        <aside class="settings-sidebar">
+                            <button type="button" class="sub-tab-btn active" data-sub-tab="general">
+                                <span>基础配置</span>
+                            </button>
+                            <button type="button" class="sub-tab-btn" data-sub-tab="permissions">
+                                <span>AI 权限管理</span>
+                            </button>
+                            <button type="button" class="sub-tab-btn" data-sub-tab="groups">
+                                <span>群聊启用设置</span>
+                            </button>
+                        </aside>
+
+                        <!-- 右侧设置面板 -->
+                        <div class="settings-content">
+                            <!-- 基础配置 -->
+                            <div class="sub-tab-content active" id="sub-tab-content-general">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <div class="card-header-title-group">
+                                            <i data-lucide="sliders" class="card-header-icon"></i>
+                                            <h2 class="card-title">基础运行配置</h2>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="form-group">
+                                            <label class="form-label">定时任务检查间隔(秒)</label>
+                                            <input type="number" class="form-input" id="config-poll-interval" min="5" max="300" required>
+                                            <span class="form-hint">后台循环检查和生成定时任务的频率，默认 15 秒。</span>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">AI 触发模式</label>
+                                            <!-- 自定义下拉框 -->
+                                            <div class="custom-select" id="select-trigger-mode" data-value="tool">
+                                                <div class="custom-select-trigger">
+                                                    <span class="custom-select-value">工具调用模式 (Tool Call)</span>
+                                                    <i data-lucide="chevron-down" class="custom-select-arrow"></i>
+                                                </div>
+                                                <div class="custom-select-options">
+                                                    <div class="custom-option" data-value="tool">工具调用模式 (Tool Call)</div>
+                                                    <div class="custom-option" data-value="xml">XML 标签模式 (XML Tag)</div>
+                                                </div>
+                                            </div>
+                                            <span class="form-hint">大模型记事和安排日程的触发机制。推荐支持 Function Calling 的模型使用 Tool Call 模式。</span>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">任务触发/生成默认上下文消息条数</label>
+                                            <input type="number" class="form-input" id="config-context-limit" min="0" max="30" required>
+                                            <span class="form-hint">定时任务生成推送内容时，向大模型附带传入的最近聊天历史消息条数。默认为 5 条。</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- AI 权限管理 -->
+                            <div class="sub-tab-content" id="sub-tab-content-permissions">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <div class="card-header-title-group">
+                                            <i data-lucide="shield-check" class="card-header-icon"></i>
+                                            <h2 class="card-title">大模型操作权限控制</h2>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 新建备忘条目</label>
+                                                <span class="form-hint">开启后，允许 AI 主动创建备忘录、定时任务或关键词监听</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-ai-allow-add">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 修改现有备忘条目</label>
+                                                <span class="form-hint">开启后，允许 AI 对备忘录、定时任务参数进行修改</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-ai-allow-update">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 删除备忘条目</label>
+                                                <span class="form-hint">开启后，允许 AI 主动在对话中删除不需要的备忘或已完成的任务</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-ai-allow-delete">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="card">
+                                    <div class="card-header">
+                                        <div class="card-header-title-group">
+                                            <i data-lucide="eye" class="card-header-icon"></i>
+                                            <h2 class="card-title">AI 可使用的备忘形式限制</h2>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 写入“状态备忘录”</label>
+                                                <span class="form-hint">是否允许 AI 写入状态/人设备忘录（AI 拥有短期状态记忆）</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-enable-status-memo-ai">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 设立“定时/周期计划任务”</label>
+                                                <span class="form-hint">是否允许 AI 在对话中设定闹钟和安排定时提醒</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-enable-task-ai">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许 AI 设立“关键词监听搭话”</label>
+                                                <span class="form-hint">是否允许 AI 设定关键词监听器主动在群聊或私聊中搭话</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-enable-keyword-trigger-ai">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 群聊启用设置 -->
+                            <div class="sub-tab-content" id="sub-tab-content-groups">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <div class="card-header-title-group">
+                                            <i data-lucide="users" class="card-header-icon"></i>
+                                            <h2 class="card-title">群聊启用与全局限制</h2>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="form-group row-align">
+                                            <div class="form-label-desc">
+                                                <label class="form-label">允许全局状态备忘</label>
+                                                <span class="form-hint">是否允许 AI 创建对所有会话/群聊生效的全局备忘录人设（关闭则仅在当前会话生效）</span>
+                                            </div>
+                                            <label class="switch-toggle">
+                                                <input type="checkbox" id="config-allow-global-memo">
+                                                <span class="slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">群聊启用过滤模式</label>
+                                            <!-- 自定义下拉框 -->
+                                            <div class="custom-select" id="select-group-filter-mode" data-value="all">
+                                                <div class="custom-select-trigger">
+                                                    <span class="custom-select-value">全部群聊启用</span>
+                                                    <i data-lucide="chevron-down" class="custom-select-arrow"></i>
+                                                </div>
+                                                <div class="custom-select-options">
+                                                    <div class="custom-option" data-value="all">全部群聊启用</div>
+                                                    <div class="custom-option" data-value="whitelist">仅在白名单群聊启用</div>
+                                                    <div class="custom-option" data-value="blacklist">在黑名单群聊禁用</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="form-group">
+                                            <label class="form-label">目标群聊号码列表</label>
+                                            <textarea class="form-input" id="config-group-list" placeholder="请输入群号，用逗号、空格或回车换行分隔"></textarea>
+                                            <span class="form-hint">仅在“仅在白名单群聊启用”或“在黑名单群禁用”模式下生效。例如: 1234567, 987654321</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 保存按钮区域 -->
+                    <div style="display: flex; justify-content: flex-end; margin-top: 24px;">
+                        <button class="btn btn-primary" id="save-config-btn" type="submit">
+                            <i data-lucide="save" class="btn-icon"></i>
+                            <span>保存配置</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+        </main>
+    </div>
+
+    <!-- 弹窗：条目新增/编辑 -->
+    <div class="modal-overlay" id="item-modal">
+        <div class="modal-container">
+            <header class="modal-header">
+                <h3 class="modal-title" id="modal-title-text">新增备忘录</h3>
+                <span class="modal-close" id="modal-close-btn" style="cursor: pointer; display: flex; align-items: center; justify-content: center;">
+                    <i data-lucide="x"></i>
+                </span>
+            </header>
+            <form id="item-form" novalidate onsubmit="return false;">
+                <!-- 隐藏的实体关键字段 -->
+                <input type="hidden" id="item-id">
+                <input type="hidden" id="item-action" value="add"> <!-- add or edit -->
+                <input type="hidden" id="item-type" value="status_memo"> <!-- status_memo, task, keyword_trigger -->
+
+                <div class="modal-body">
+                    <!-- 状态备忘录表单区域 -->
+                    <div id="fields-status_memo" class="form-fields-group">
+                        <div class="form-group">
+                            <label class="form-label">备忘录内容</label>
+                            <textarea class="form-input" id="status-content" placeholder="输入 AI 需要遵循的状态或备忘记忆描述" required></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">有效时长(分钟)</label>
+                            <input type="number" class="form-input" id="status-minutes" min="1" max="10080" placeholder="例如 60 (一小时)" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">作用的群号/会话 ID</label>
+                            <input type="text" class="form-input" id="status-umo" placeholder="例如：GLOBAL 或 g:1234567" required>
+                            <span class="form-hint">填写 GLOBAL 代表全局生效，或者填入特定的群号/会话 ID（如 g:1234567）。</span>
+                        </div>
+                    </div>
+
+                    <!-- 定时任务表单区域 -->
+                    <div id="fields-task" class="form-fields-group" style="display: none;">
+                        <div class="form-group">
+                            <label class="form-label">任务计划描述</label>
+                            <textarea class="form-input" id="task-desc" placeholder="例如：提醒群主今天下午要开会；向大家问好并播报早报内容" required></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">任务执行类型</label>
+                            <div class="custom-select" id="select-task-type" data-value="one_off">
+                                <div class="custom-select-trigger">
+                                    <span class="custom-select-value">单次定时提醒</span>
+                                    <i data-lucide="chevron-down" class="custom-select-arrow"></i>
+                                </div>
+                                <div class="custom-select-options">
+                                    <div class="custom-option" data-value="one_off">单次定时提醒 (one_off)</div>
+                                    <div class="custom-option" data-value="daily">每日定时提醒 (daily)</div>
+                                    <div class="custom-option" data-value="interval">周期性间隔提醒 (interval)</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" id="task-value-label">触发时间参数(分钟后)</label>
+                            <input type="text" class="form-input" id="task-value" placeholder="单次定时请填整数分钟，例如：30" required>
+                            <span class="form-hint" id="task-value-hint">对于单次定时，请输入整数代表多少分钟后执行本任务。</span>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">推送目标会话 ID (Unified MSG Origin)</label>
+                            <input type="text" class="form-input" id="task-umo" placeholder="例如：g:1234567 或 u:987654" required>
+                            <span class="form-hint">定时推送的目标群聊/私聊统一格式 ID。填 GLOBAL 代表全局广播。</span>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">附带上下文历史消息数</label>
+                            <input type="number" class="form-input" id="task-context" min="0" max="30" required>
+                        </div>
+                    </div>
+
+                    <!-- 关键词监听表单区域 -->
+                    <div id="fields-keyword_trigger" class="form-fields-group" style="display: none;">
+                        <div class="form-group">
+                            <label class="form-label">触发关键词</label>
+                            <input type="text" class="form-input" id="trigger-keyword" placeholder="例如：学习、下课、点外卖" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">AI 回复/搭话策略描述</label>
+                            <textarea class="form-input" id="trigger-desc" placeholder="例如：以慵懒的语气吐槽不想上课；提醒大家按时吃早饭，推荐附近的螺蛳粉" required></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">附带上下文历史消息数</label>
+                            <input type="number" class="form-input" id="trigger-context" min="0" max="30" required>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">作用的群号/会话 ID</label>
+                            <input type="text" class="form-input" id="trigger-umo" placeholder="例如：GLOBAL 或 g:1234567" required>
+                            <span class="form-hint">填写 GLOBAL 代表全局生效，或者填入特定的群号/会话 ID。</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <footer class="modal-footer">
+                    <button class="btn btn-secondary" type="button" id="modal-cancel-btn">取消</button>
+                    <button class="btn btn-primary" type="submit" id="modal-submit-btn">确认</button>
+                </footer>
+            </form>
+        </div>
+    </div>
+
+    <!-- 二次确认弹窗 -->
+    <div class="modal-overlay" id="confirm-modal-overlay">
+        <div class="modal-container" style="max-width: 400px;">
+            <header class="modal-header">
+                <h3 class="modal-title">确认操作</h3>
+            </header>
+            <div class="modal-body">
+                <p id="confirm-modal-text" style="font-size: 15px; color: var(--text-primary); line-height: 1.5;">确定要删除该条目吗？</p>
+            </div>
+            <footer class="modal-footer" style="padding-top: 16px; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 12px;">
+                <button class="btn btn-secondary" type="button" id="confirm-modal-cancel-btn">取消</button>
+                <button class="btn btn-danger" type="button" id="confirm-modal-ok-btn">确定</button>
+            </footer>
+        </div>
+    </div>
+
+    <!-- 悬浮 Toast 通知 -->
+    <div class="toast" id="toast">操作成功</div>
+
+    <!-- 导入外部依赖及业务 JavaScript -->
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.407.0/dist/umd/lucide.min.js"></script>
+    <script src="index.js"></script>
+</body>
+</html>
