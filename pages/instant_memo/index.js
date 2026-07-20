@@ -174,6 +174,10 @@ async function init() {
             valueLabel.textContent = "每日触发时刻 (HH:MM)";
             valueHint.textContent = "请输入每日定点执行时刻（输入 HH:MM 格式，如：08:30 或 22:00）";
             valueInput.placeholder = "例如 08:30";
+        } else if (type === "workday") {
+            valueLabel.textContent = "工作日触发时刻 (HH:MM)";
+            valueHint.textContent = "请输入工作日定点执行时刻，仅周一至周五触发（输入 HH:MM 格式，如：09:00）";
+            valueInput.placeholder = "例如 09:00";
         } else if (type === "interval") {
             valueLabel.textContent = "循环提醒间隔 (分钟)";
             valueHint.textContent = "请输入循环间隔时长（输入分钟数，如：60 表示每隔 1 小时提醒一次）";
@@ -519,13 +523,13 @@ async function init() {
                 if (taskKeys.length === 0) {
                     tasksBody.innerHTML = `
                         <tr>
-                            <td colspan="6" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
+                            <td colspan="7" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
                         </tr>
                     `;
                 } else {
                     tasksBody.innerHTML = taskKeys.map(key => {
                         const task = allTasks[key];
-                        const typeCN = { "one_off": "单次", "daily": "每日", "interval": "周期性间隔" };
+                        const typeCN = { "one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "周期性间隔" };
                         const statusCN = { "pending": "等待生成", "generating": "正在生成", "ready": "生成就绪", "failed": "生成失败" };
                         
                         let schedValueDisplay = task.scheduled_time;
@@ -533,11 +537,21 @@ async function init() {
                             schedValueDisplay += " 分钟";
                         }
                         
+                        let nextRunDisplay = "—";
+                        if (task.trigger_timestamp) {
+                            const dt = new Date(task.trigger_timestamp * 1000);
+                            if (!isNaN(dt.getTime())) {
+                                const pad = (n) => String(n).padStart(2, "0");
+                                nextRunDisplay = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+                            }
+                        }
+                        
                         return `
                             <tr>
                                 <td class="cell-wrap">${escapeHtml(task.task_description)}</td>
                                 <td><span class="type-indicator">${typeCN[task.type] || task.type}</span></td>
                                 <td>${schedValueDisplay}</td>
+                                <td>${nextRunDisplay}</td>
                                 <td><code style="font-family: monospace;">${escapeHtml(task.target_umo)}</code></td>
                                 <td><span class="status-badge ${task.status}">${statusCN[task.status] || task.status}</span></td>
                                 <td>

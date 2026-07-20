@@ -84,6 +84,7 @@
                                     <th>任务计划描述</th>
                                     <th>类型</th>
                                     <th>执行时刻/周期</th>
+                                    <th>下一次执行时间</th>
                                     <th>目标 Unified MSG Origin (会话ID)</th>
                                     <th>当前状态</th>
                                     <th>操作</th>
@@ -91,7 +92,7 @@
                             </thead>
                             <tbody id="tasks-body">
                                 <tr>
-                                    <td colspan="6" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
+                                    <td colspan="7" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -382,6 +383,7 @@
                                 <div class="custom-select-options">
                                     <div class="custom-option" data-value="one_off">单次定时提醒 (one_off)</div>
                                     <div class="custom-option" data-value="daily">每日定时提醒 (daily)</div>
+                                    <div class="custom-option" data-value="workday">工作日定时提醒 (workday)</div>
                                     <div class="custom-option" data-value="interval">周期性间隔提醒 (interval)</div>
                                 </div>
                             </div>
