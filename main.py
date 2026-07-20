@@ -28,6 +28,24 @@ def get_next_daily_timestamp(time_str: str) -> float:
         target_dt += timedelta(days=1)
     return target_dt.timestamp()
 
+def get_next_workday_timestamp(time_str: str) -> float:
+    """根据 HH:MM 获取下一次工作日（周一至周五）的绝对时间戳。若当天已过或为周末，则顺延到下一个工作日。"""
+    try:
+        parts = time_str.strip().split(":")
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        hour, minute = 12, 0  # 默认兜底
+
+    now = datetime.now()
+    target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target_dt <= now:
+        target_dt += timedelta(days=1)
+    # weekday(): 周一=0 ... 周五=4, 周六=5, 周日=6。跳过周末
+    while target_dt.weekday() >= 5:
+        target_dt += timedelta(days=1)
+    return target_dt.timestamp()
+
 @register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.2")
 class AIMemoPlugin(Star):
     def __init__(self, context: Context, config: dict):
@@ -246,7 +264,7 @@ class AIMemoPlugin(Star):
                     
                 elif item["type"] == "task":
                     t_type = data.get("type", "one_off")
-                    type_cn = {"one_off": "单次", "daily": "每日", "interval": "间隔"}
+                    type_cn = {"one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "间隔"}
                     trigger_t = data.get("trigger_timestamp", 0)
                     time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
                     status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪", "failed": "失败"}
@@ -299,7 +317,7 @@ class AIMemoPlugin(Star):
                     "❌ 用法：/memo edit <序号> <属性> <新值>\n\n"
                     "💡 支持修改的属性：\n"
                     "- 状态备忘录：content(内容), expire(时间/分钟), global(是否全局)\n"
-                    "- 定时任务：desc(描述), value(触发时间), type(类型:one_off/daily/interval)\n"
+                    "- 定时任务：desc(描述), value(触发时间), type(类型:one_off/daily/workday/interval)\n"
                     "- 关键词搭话：keyword(触发词), desc(回复设定), global(是否全局)"
                 )
                 return
@@ -357,6 +375,11 @@ class AIMemoPlugin(Star):
                             yield event.plain_result("❌ 错误：对于每日定时(daily)，时间值必须是 HH:MM 格式，例如 '12:00'。")
                             return
                         trigger_time = get_next_daily_timestamp(val)
+                    elif t_type == "workday":
+                        if ":" not in val:
+                            yield event.plain_result("❌ 错误：对于工作日定时(workday)，时间值必须是 HH:MM 格式，例如 '09:00'。")
+                            return
+                        trigger_time = get_next_workday_timestamp(val)
                     elif t_type == "interval":
                         try:
                             mins = int(val)
@@ -373,8 +396,8 @@ class AIMemoPlugin(Star):
                     yield event.plain_result(f"✅ 已将定时任务触发参数修改为 '{val}'，并已重新排程。")
                 elif field in ["type", "类型"]:
                     val_clean = val.lower().strip()
-                    if val_clean not in ["one_off", "daily", "interval"]:
-                        yield event.plain_result("❌ 错误：类型必须是 'one_off'、'daily' 或 'interval'。")
+                    if val_clean not in ["one_off", "daily", "workday", "interval"]:
+                        yield event.plain_result("❌ 错误：类型必须是 'one_off'、'daily'、'workday' 或 'interval'。")
                         return
                     data["type"] = val_clean
                     val_s = data.get("scheduled_time", "")
@@ -385,6 +408,8 @@ class AIMemoPlugin(Star):
                             trigger_time = current_time + mins * 60
                         elif val_clean == "daily":
                             trigger_time = get_next_daily_timestamp(val_s)
+                        elif val_clean == "workday":
+                            trigger_time = get_next_workday_timestamp(val_s)
                         elif val_clean == "interval":
                             mins = int(val_s)
                             trigger_time = current_time + mins * 60
@@ -427,7 +452,7 @@ class AIMemoPlugin(Star):
                 "- /memo edit <序号> <属性> <新值> : 修改指定条目的属性\n\n"
                 "💡 可修改属性说明：\n"
                 "- 状态备忘录：content, expire, global\n"
-                "- 定时任务：desc, value, type(one_off/daily/interval)\n"
+                "- 定时任务：desc, value, type(one_off/daily/workday/interval)\n"
                 "- 关键词搭话：keyword, desc, global"
             )
             return
@@ -533,10 +558,11 @@ class AIMemoPlugin(Star):
         
         Args:
             task_description (string): 定时提醒的任务具体内容，AI需要根据此描述给用户发送相应的提醒消息。
-            task_type (string): 任务类型。必须为 'one_off' (单次定时), 'daily' (每日定时) 或 'interval' (周期循环)。
+            task_type (string): 任务类型。必须为 'one_off' (单次定时), 'daily' (每日定时), 'workday' (工作日定时) 或 'interval' (周期循环)。
             schedule_value (string): 触发时间参数。
                 - 当 task_type 为 'one_off' 时，value 必须为整数代表分钟数，如 '30' 表示30分钟后。
                 - 当 task_type 为 'daily' 时，value 必须是 HH:MM 格式，例如 '12:30' 表示每天中午12点30分。
+                - 当 task_type 为 'workday' 时，value 必须是 HH:MM 格式，例如 '09:00' 表示每个工作日（周一至周五）上午9点触发，周末不触发。
                 - 当 task_type 为 'interval' 时，value 必须为整数代表循环间隔分钟数，如 '60' 表示每60分钟一次。
             context_history_limit (int, optional): 触发时携带的前文历史条数，默认 5。
         """
@@ -550,8 +576,8 @@ class AIMemoPlugin(Star):
         current_time = time.time()
         
         t_type = task_type.strip().lower()
-        if t_type not in ["one_off", "daily", "interval"]:
-            return "错误：task_type 参数必须是 'one_off'、'daily' 或 'interval' 中的一个。"
+        if t_type not in ["one_off", "daily", "workday", "interval"]:
+            return "错误：task_type 参数必须是 'one_off'、'daily'、'workday' 或 'interval' 中的一个。"
             
         trigger_time = 0.0
         val = schedule_value.strip()
@@ -589,6 +615,24 @@ class AIMemoPlugin(Star):
             if ":" not in val:
                 return "错误：对于 daily 每日定时，schedule_value 必须是 HH:MM 格式，例如 '12:00'。"
             trigger_time = get_next_daily_timestamp(val)
+        elif t_type == "workday":
+            if ":" not in val:
+                match = re.search(r'(\d{1,2})[:：点\s](\d{2})', val)
+                if match:
+                    hours = int(match.group(1))
+                    minutes = int(match.group(2))
+                    if 0 <= hours <= 23 and 0 <= minutes <= 59:
+                        val = f"{hours:02d}:{minutes:02d}"
+                else:
+                    match_single = re.search(r'^(\d{1,2})(?:点|时)?$', val)
+                    if match_single:
+                        hours = int(match_single.group(1))
+                        if 0 <= hours <= 23:
+                            val = f"{hours:02d}:00"
+
+            if ":" not in val:
+                return "错误：对于 workday 工作日定时，schedule_value 必须是 HH:MM 格式，例如 '09:00'。"
+            trigger_time = get_next_workday_timestamp(val)
         elif t_type == "interval":
             try:
                 mins = int(val)
@@ -616,7 +660,7 @@ class AIMemoPlugin(Star):
         }
         await self._save_data()
         
-        type_cn = {"one_off": "单次定时", "daily": "每日定时", "interval": "周期性时间间隔循环"}
+        type_cn = {"one_off": "单次定时", "daily": "每日定时", "workday": "工作日定时", "interval": "周期性时间间隔循环"}
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_time))
         return f"[后台隐蔽消息] 已成功设立主动任务（{type_cn[t_type]}）。将在 {time_str} 首次触发。请完全以人设身份正常回复用户，【严禁】在回复中向用户暴露任务内容或系统确认话术！"
 
@@ -751,7 +795,7 @@ class AIMemoPlugin(Star):
                 continue
                 
             if task.get("target_umo") == umo:
-                type_cn = {"one_off": "单次定时", "daily": "每日定时", "interval": "周期性循环"}
+                type_cn = {"one_off": "单次定时", "daily": "每日定时", "workday": "工作日定时", "interval": "周期性循环"}
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
                 status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪发送", "failed": "执行失败"}
                 active_tasks_info.append(
@@ -810,7 +854,7 @@ class AIMemoPlugin(Star):
                 "格式如下：\n"
                 "1. 状态备忘录：<ai_memo action=\"set_status\" minutes_later=\"分钟数\" is_global=\"true|false\">状态/隐秘内容</ai_memo>\n"
                 "2. 删状态备忘：<ai_memo action=\"delete_status\" memo_id=\"备忘录ID或前8位短ID\" />\n"
-                "3. 定时/循环：<ai_memo action=\"set_task\" type=\"one_off|daily|interval\" value=\"具体数值或时间\" history_limit=\"条数\">任务设定描述</ai_memo>（注意：当 type 为 one_off 或 interval 时，value 必须为整数代表分钟数，如 \"30\"；当 type 为 daily 时，value 必须为 HH:MM 格式，如 \"12:30\"）\n"
+                "3. 定时/循环：<ai_memo action=\"set_task\" type=\"one_off|daily|workday|interval\" value=\"具体数值或时间\" history_limit=\"条数\">任务设定描述</ai_memo>（注意：当 type 为 one_off 或 interval 时，value 必须为整数代表分钟数，如 \"30\"；当 type 为 daily 或 workday 时，value 必须为 HH:MM 格式，如 \"12:30\"，其中 workday 仅在周一至周五触发）\n"
                 "4. 删定时任务：<ai_memo action=\"delete_task\" task_id=\"任务ID或前8位短ID\" />\n"
                 "5. 监听关键词：<ai_memo action=\"set_keyword\" keyword=\"触发词\" history_limit=\"条数\" is_global=\"true|false\">接话语气和任务设定</ai_memo>\n"
                 "6. 删关键监听：<ai_memo action=\"delete_keyword\" trigger_id=\"触发器ID或前8位短ID\" />\n"
@@ -1048,6 +1092,11 @@ class AIMemoPlugin(Star):
             task["status"] = "pending"
             task["generated_message"] = ""
             task["last_run_timestamp"] = current_time
+        elif t_type == "workday":
+            task["trigger_timestamp"] = get_next_workday_timestamp(task["scheduled_time"])
+            task["status"] = "pending"
+            task["generated_message"] = ""
+            task["last_run_timestamp"] = current_time
         elif t_type == "interval":
             try:
                 interval_mins = int(task["scheduled_time"])
@@ -1247,7 +1296,7 @@ class AIMemoPlugin(Star):
                 context_history_limit = int(req_data.get("context_history_limit", 5))
                 target_umo = req_data.get("target_umo", "GLOBAL").strip()
                 
-                if task_type not in ["one_off", "daily", "interval"]:
+                if task_type not in ["one_off", "daily", "workday", "interval"]:
                     return jsonify({"status": "error", "message": "Invalid task type"}), 400
                     
                 trigger_time = 0.0
@@ -1262,6 +1311,10 @@ class AIMemoPlugin(Star):
                     if ":" not in schedule_val:
                         return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
                     trigger_time = get_next_daily_timestamp(schedule_val)
+                elif task_type == "workday":
+                    if ":" not in schedule_val:
+                        return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
+                    trigger_time = get_next_workday_timestamp(schedule_val)
                 elif task_type == "interval":
                     try:
                         mins = int(schedule_val)
@@ -1358,9 +1411,9 @@ class AIMemoPlugin(Star):
                     t_type = update_fields.get("task_type", task.get("type")).strip().lower()
                     schedule_val = update_fields.get("schedule_value", task.get("scheduled_time")).strip()
                     
-                    if t_type not in ["one_off", "daily", "interval"]:
+                    if t_type not in ["one_off", "daily", "workday", "interval"]:
                         return jsonify({"status": "error", "message": "Invalid task type"}), 400
-                        
+
                     trigger_time = 0.0
                     current_time = time.time()
                     if t_type == "one_off":
@@ -1373,6 +1426,10 @@ class AIMemoPlugin(Star):
                         if ":" not in schedule_val:
                             return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
                         trigger_time = get_next_daily_timestamp(schedule_val)
+                    elif t_type == "workday":
+                        if ":" not in schedule_val:
+                            return jsonify({"status": "error", "message": "schedule_value 必须是 HH:MM 格式"}), 400
+                        trigger_time = get_next_workday_timestamp(schedule_val)
                     elif t_type == "interval":
                         try:
                             mins = int(schedule_val)
