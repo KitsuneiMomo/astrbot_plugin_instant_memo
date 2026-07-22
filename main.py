@@ -479,6 +479,13 @@ class AIMemoPlugin(Star):
     
     @llm_tool(name="set_status_memo")
     async def set_status_memo(self, event: AstrMessageEvent, content: str, minutes_later: int, is_global: bool) -> str:
+        """记录一条状态/人设备忘录，在指定时间后过期。用于记住当前人设状态、待办事项或需要持续记住的信息。
+
+        Args:
+            content (string): 备忘录的具体内容，即需要记住的状态或事项文本。
+            minutes_later (number): 备忘录多少分钟后过期。设为较大数值（如 1440）可视为长期保留；设为 0 表示立即过期（等价于不记录）。
+            is_global (boolean): 是否为全局备忘录。True 表示对所有会话生效；False 表示仅对当前会话生效。
+        """
         if not self._is_allowed(event, "add", "status_memo"):
             return "[后台隐蔽消息] 新增状态备忘的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
 
@@ -501,6 +508,11 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_status_memo")
     async def delete_status_memo(self, event: AstrMessageEvent, memo_id: str) -> str:
+        """删除一条已存在的状态/人设备忘录。可通过完整 UUID、8 位前缀 UUID 或序号来定位。
+
+        Args:
+            memo_id (string): 要删除的备忘录 ID。可以是完整 UUID、UUID 前 8 位，或通过 /memo 指令列表中显示的序号（如 '1'）。
+        """
         if not self._is_allowed(event, "delete", "status_memo"):
             return "[后台隐蔽消息] 删除状态备忘的操作已被管理员禁用。请保持人设回复用户。"
 
@@ -622,6 +634,11 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_active_task")
     async def delete_active_task(self, event: AstrMessageEvent, task_id: str) -> str:
+        """删除一条已存在的主动定时任务。可通过完整 UUID、8 位前缀 UUID 或序号来定位。
+
+        Args:
+            task_id (string): 要删除的定时任务 ID。可以是完整 UUID、UUID 前 8 位，或通过 /memo 指令列表中显示的序号（如 '1'）。
+        """
         if not self._is_allowed(event, "delete", "task"):
             return "[后台隐蔽消息] 删除定时提醒任务的操作已被管理员禁用。请保持人设回复用户。"
 
@@ -647,7 +664,13 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="set_active_reminder")
     async def set_active_reminder(self, event: AstrMessageEvent, task_description: str, minutes_later: int, exact_message_to_send: str = "") -> str:
-        """兼容保留的 API 工具"""
+        """兼容保留的 API 工具。设立一个单次定时主动提醒（one_off 类型），在指定分钟后由 AI 主动给用户发消息。
+
+        Args:
+            task_description (string): 提醒任务的描述内容，AI 会据此生成提醒消息。
+            minutes_later (number): 多少分钟后触发并主动发送提醒。
+            exact_message_to_send (string, optional): 指定提醒时要发送的精确消息文本；留空则由 AI 根据 task_description 自行生成。
+        """
         return await self.set_scheduled_task(
             event=event,
             task_description=task_description,
@@ -660,6 +683,14 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="set_keyword_trigger_task")
     async def set_keyword_trigger_task(self, event: AstrMessageEvent, keyword: str, task_description: str, context_history_limit: int = 5, is_global: bool = True) -> str:
+        """注册一个关键词搭话监听任务。当用户消息中包含指定关键词时，AI 会主动按描述发起搭话。
+
+        Args:
+            keyword (string): 触发搭话的关键词。用户消息文本中出现该词时触发。
+            task_description (string): 触发后搭话任务的描述内容，指导 AI 该如何搭话。
+            context_history_limit (number, optional): 触发时携带的前文历史条数，默认 5。
+            is_global (boolean, optional): 是否为全局监听。True 表示对所有会话生效（默认）；False 表示仅当前会话生效。
+        """
         if not self._is_allowed(event, "add", "keyword_trigger"):
             return "[后台隐蔽消息] 创建关键词搭话监听的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
 
@@ -686,6 +717,11 @@ class AIMemoPlugin(Star):
 
     @llm_tool(name="delete_keyword_trigger")
     async def delete_keyword_trigger(self, event: AstrMessageEvent, trigger_id: str) -> str:
+        """删除一条已存在的关键词搭话监听任务。可通过完整 UUID、8 位前缀 UUID 或序号来定位。
+
+        Args:
+            trigger_id (string): 要删除的关键词监听任务 ID。可以是完整 UUID、UUID 前 8 位，或通过 /memo 指令列表中显示的序号（如 '1'）。
+        """
         if not self._is_allowed(event, "delete", "keyword_trigger"):
             return "[后台隐蔽消息] 删除关键词搭话监听的操作已被管理员禁用。请保持人设回复用户。"
 
