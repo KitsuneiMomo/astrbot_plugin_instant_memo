@@ -84,6 +84,7 @@
                                     <th>任务计划描述</th>
                                     <th>类型</th>
                                     <th>执行时刻/周期</th>
+                                    <th>下一次执行时间</th>
                                     <th>目标 Unified MSG Origin (会话ID)</th>
                                     <th>当前状态</th>
                                     <th>操作</th>
@@ -91,7 +92,7 @@
                             </thead>
                             <tbody id="tasks-body">
                                 <tr>
-                                    <td colspan="6" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
+                                    <td colspan="7" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -356,13 +357,28 @@
                             <textarea class="form-input" id="status-content" placeholder="输入 AI 需要遵循的状态或备忘记忆描述" required></textarea>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">有效时长(分钟)</label>
-                            <input type="number" class="form-input" id="status-minutes" min="1" max="10080" placeholder="例如 60 (一小时)" required>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                <label class="form-label" style="margin-bottom: 0;">有效时长(分钟)</label>
+                                <label style="display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; color: var(--primary-color, #4f46e5); font-weight: 500;">
+                                    <input type="checkbox" id="status-is-permanent" style="margin-right: 6px; cursor: pointer;">
+                                    永久有效 (永不过期)
+                                </label>
+                            </div>
+                            <input type="number" class="form-input" id="status-minutes" min="1" max="525600" placeholder="例如 60 (一小时)">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">作用的群号/会话 ID</label>
-                            <input type="text" class="form-input" id="status-umo" placeholder="例如：GLOBAL 或 g:1234567" required>
-                            <span class="form-hint">填写 GLOBAL 代表全局生效，或者填入特定的群号/会话 ID（如 g:1234567）。</span>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                <label class="form-label" style="margin-bottom: 0;">作用的目标范围/会话</label>
+                                <label style="display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; color: var(--primary-color, #4f46e5); font-weight: 500;">
+                                    <input type="checkbox" id="status-is-global" class="toggle-global-checkbox" style="margin-right: 6px; cursor: pointer;">
+                                    全局生效 (GLOBAL)
+                                </label>
+                            </div>
+                            <input type="text" class="form-input" id="status-umo" placeholder="目标群号(如: 123456) 或 群:成员(如: 123456:7890)">
+                            <span class="form-hint" id="status-umo-hint">
+                                💡 <b>勾选全局</b>：留空全平台生效；填写QQ号(如 456)则为该用户全局生效。<br>
+                                💡 <b>未勾选全局</b>：可填群号(如 123)或 群:成员(如 123:456,678)，支持逗号/分号分割多个。
+                            </span>
                         </div>
                     </div>
 
@@ -382,6 +398,7 @@
                                 <div class="custom-select-options">
                                     <div class="custom-option" data-value="one_off">单次定时提醒 (one_off)</div>
                                     <div class="custom-option" data-value="daily">每日定时提醒 (daily)</div>
+                                    <div class="custom-option" data-value="workday">工作日定时提醒 (workday)</div>
                                     <div class="custom-option" data-value="interval">周期性间隔提醒 (interval)</div>
                                 </div>
                             </div>
@@ -392,9 +409,18 @@
                             <span class="form-hint" id="task-value-hint">对于单次定时，请输入整数代表多少分钟后执行本任务。</span>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">推送目标会话 ID (Unified MSG Origin)</label>
-                            <input type="text" class="form-input" id="task-umo" placeholder="例如：g:1234567 或 u:987654" required>
-                            <span class="form-hint">定时推送的目标群聊/私聊统一格式 ID。填 GLOBAL 代表全局广播。</span>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                <label class="form-label" style="margin-bottom: 0;">推送目标会话 / 群聊 ID</label>
+                                <label style="display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; color: var(--primary-color, #4f46e5); font-weight: 500;">
+                                    <input type="checkbox" id="task-is-global" class="toggle-global-checkbox" style="margin-right: 6px; cursor: pointer;">
+                                    全局广播 (GLOBAL)
+                                </label>
+                            </div>
+                            <input type="text" class="form-input" id="task-umo" placeholder="目标群号(如: 123456) 或 群:成员(如: 123456:7890)">
+                            <span class="form-hint" id="task-umo-hint">
+                                💡 <b>勾选全局</b>：广播给所有人；填写QQ号(如 456)则为该用户全局生效。<br>
+                                💡 <b>未勾选全局</b>：可填群号(如 123)或 群:成员(如 123:456,678)，支持逗号/分号分割多个。
+                            </span>
                         </div>
                         <div class="form-group">
                             <label class="form-label">附带上下文历史消息数</label>
@@ -417,9 +443,18 @@
                             <input type="number" class="form-input" id="trigger-context" min="0" max="30" required>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">作用的群号/会话 ID</label>
-                            <input type="text" class="form-input" id="trigger-umo" placeholder="例如：GLOBAL 或 g:1234567" required>
-                            <span class="form-hint">填写 GLOBAL 代表全局生效，或者填入特定的群号/会话 ID。</span>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                <label class="form-label" style="margin-bottom: 0;">监听的目标范围/会话</label>
+                                <label style="display: inline-flex; align-items: center; cursor: pointer; font-size: 13px; color: var(--primary-color, #4f46e5); font-weight: 500;">
+                                    <input type="checkbox" id="trigger-is-global" class="toggle-global-checkbox" style="margin-right: 6px; cursor: pointer;">
+                                    全局生效 (GLOBAL)
+                                </label>
+                            </div>
+                            <input type="text" class="form-input" id="trigger-umo" placeholder="目标群号(如: 123456) 或 群:成员(如: 123456:7890)">
+                            <span class="form-hint" id="trigger-umo-hint">
+                                💡 <b>勾选全局</b>：留空全平台生效；填写QQ号(如 456)则为该用户全局生效。<br>
+                                💡 <b>未勾选全局</b>：可填群号(如 123)或 群:成员(如 123:456,678)，支持逗号/分号分割多个。
+                            </span>
                         </div>
                     </div>
                 </div>

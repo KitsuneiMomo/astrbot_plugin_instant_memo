@@ -174,6 +174,10 @@ async function init() {
             valueLabel.textContent = "每日触发时刻 (HH:MM)";
             valueHint.textContent = "请输入每日定点执行时刻（输入 HH:MM 格式，如：08:30 或 22:00）";
             valueInput.placeholder = "例如 08:30";
+        } else if (type === "workday") {
+            valueLabel.textContent = "工作日触发时刻 (HH:MM)";
+            valueHint.textContent = "请输入工作日定点执行时刻，仅周一至周五触发（输入 HH:MM 格式，如：09:00）";
+            valueInput.placeholder = "例如 09:00";
         } else if (type === "interval") {
             valueLabel.textContent = "循环提醒间隔 (分钟)";
             valueHint.textContent = "请输入循环间隔时长（输入分钟数，如：60 表示每隔 1 小时提醒一次）";
@@ -240,6 +244,77 @@ async function init() {
         }
     });
 
+    function setupScopeHelper(prefix, target_umo = "GLOBAL") {
+        const isGlobalCb = document.getElementById(`${prefix}-is-global`);
+        const umoInput = document.getElementById(`${prefix}-umo`);
+        const umoStr = (target_umo || "").trim();
+
+        if (!umoStr || umoStr.toUpperCase() === "GLOBAL") {
+            if (isGlobalCb) isGlobalCb.checked = true;
+            if (umoInput) umoInput.value = "";
+        } else if (umoStr.toUpperCase().startsWith("GLOBAL:")) {
+            if (isGlobalCb) isGlobalCb.checked = true;
+            if (umoInput) umoInput.value = umoStr.substring(7);
+        } else {
+            if (isGlobalCb) isGlobalCb.checked = false;
+            if (umoInput) umoInput.value = umoStr;
+        }
+        updateScopePlaceholder(prefix);
+    }
+
+    function updateScopePlaceholder(prefix) {
+        const isGlobalCb = document.getElementById(`${prefix}-is-global`);
+        const umoInput = document.getElementById(`${prefix}-umo`);
+        if (!isGlobalCb || !umoInput) return;
+        if (isGlobalCb.checked) {
+            umoInput.placeholder = "选填：特定用户ID/QQ (如: 456, 678，留空全平台所有人生效)";
+        } else {
+            umoInput.placeholder = "目标群号(如: 123) 或 群:成员(如: 123:456,678)";
+        }
+    }
+
+    function getScopeValue(prefix) {
+        const isGlobalCb = document.getElementById(`${prefix}-is-global`);
+        const umoInput = document.getElementById(`${prefix}-umo`);
+        const isGlobal = isGlobalCb ? isGlobalCb.checked : false;
+        const val = umoInput ? umoInput.value.trim() : "";
+
+        let target_umo = "";
+        if (isGlobal) {
+            if (!val || val.toUpperCase() === "GLOBAL") {
+                target_umo = "GLOBAL";
+            } else {
+                target_umo = `GLOBAL:${val}`;
+            }
+        } else {
+            if (!val) {
+                target_umo = "GLOBAL";
+            } else {
+                target_umo = val;
+            }
+        }
+        return { is_global: isGlobal, target_umo: target_umo };
+    }
+
+    ["status", "task", "trigger"].forEach(prefix => {
+        const cb = document.getElementById(`${prefix}-is-global`);
+        if (cb) {
+            cb.addEventListener("change", () => updateScopePlaceholder(prefix));
+        }
+    });
+
+    const permCb = document.getElementById("status-is-permanent");
+    if (permCb) {
+        permCb.addEventListener("change", () => {
+            const minInput = document.getElementById("status-minutes");
+            if (minInput) {
+                minInput.disabled = permCb.checked;
+                if (permCb.checked) minInput.value = "";
+                else if (!minInput.value) minInput.value = 60;
+            }
+        });
+    }
+
     function openModal(type, action = "add", id = null) {
         document.getElementById("item-type").value = type;
         document.getElementById("item-action").value = action;
@@ -264,16 +339,22 @@ async function init() {
         if (action === "add") {
             itemForm.reset();
             if (type === "status_memo") {
-                document.getElementById("status-minutes").value = 60;
-                document.getElementById("status-umo").value = "GLOBAL";
+                const isPermCb = document.getElementById("status-is-permanent");
+                const minInput = document.getElementById("status-minutes");
+                if (isPermCb) isPermCb.checked = false;
+                if (minInput) {
+                    minInput.disabled = false;
+                    minInput.value = 60;
+                }
+                setupScopeHelper("status", "GLOBAL");
             } else if (type === "task") {
                 setCustomSelectValue("select-task-type", "one_off");
                 handleTaskTypeChange("one_off");
                 document.getElementById("task-context").value = 5;
-                document.getElementById("task-umo").value = "GLOBAL";
+                setupScopeHelper("task", "GLOBAL");
             } else if (type === "keyword_trigger") {
                 document.getElementById("trigger-context").value = 5;
-                document.getElementById("trigger-umo").value = "GLOBAL";
+                setupScopeHelper("trigger", "GLOBAL");
             }
         } else {
             // Edit mode: Populate form fields from cache
@@ -281,24 +362,34 @@ async function init() {
                 const item = allMemos[id];
                 document.getElementById("status-content").value = item.content;
                 
-                // Calculate remaining minutes for expire field
-                const remainingMins = Math.max(1, Math.round((item.expire_timestamp - Date.now()/1000) / 60));
-                document.getElementById("status-minutes").value = remainingMins;
-                document.getElementById("status-umo").value = item.target_umo || "GLOBAL";
+                const isPerm = item.expire_timestamp <= 0;
+                const isPermCb = document.getElementById("status-is-permanent");
+                const minInput = document.getElementById("status-minutes");
+                if (isPermCb) isPermCb.checked = isPerm;
+                if (minInput) {
+                    minInput.disabled = isPerm;
+                    if (isPerm) {
+                        minInput.value = "";
+                    } else {
+                        const remainingMins = Math.max(1, Math.round((item.expire_timestamp - Date.now()/1000) / 60));
+                        minInput.value = remainingMins;
+                    }
+                }
+                setupScopeHelper("status", item.target_umo || "GLOBAL");
             } else if (type === "task") {
                 const item = allTasks[id];
                 document.getElementById("task-desc").value = item.task_description;
                 setCustomSelectValue("select-task-type", item.type);
                 handleTaskTypeChange(item.type);
                 document.getElementById("task-value").value = item.scheduled_time;
-                document.getElementById("task-umo").value = item.target_umo;
+                setupScopeHelper("task", item.target_umo || "GLOBAL");
                 document.getElementById("task-context").value = item.context_history_limit || 5;
             } else if (type === "keyword_trigger") {
                 const item = allTriggers[id];
                 document.getElementById("trigger-keyword").value = item.keyword;
                 document.getElementById("trigger-desc").value = item.task_description;
                 document.getElementById("trigger-context").value = item.context_history_limit || 5;
-                document.getElementById("trigger-umo").value = item.target_umo || "GLOBAL";
+                setupScopeHelper("trigger", item.target_umo || "GLOBAL");
             }
         }
 
@@ -324,25 +415,33 @@ async function init() {
         let payload = {};
         
         if (type === "status_memo") {
+            const scope = getScopeValue("status");
+            const isPerm = document.getElementById("status-is-permanent").checked;
+            const minutesVal = isPerm ? -1 : (parseInt(document.getElementById("status-minutes").value) || 60);
             payload = {
                 content: document.getElementById("status-content").value,
-                minutes_later: parseInt(document.getElementById("status-minutes").value) || 60,
-                target_umo: document.getElementById("status-umo").value.trim()
+                minutes_later: minutesVal,
+                is_global: scope.is_global,
+                target_umo: scope.target_umo
             };
         } else if (type === "task") {
+            const scope = getScopeValue("task");
             payload = {
                 task_description: document.getElementById("task-desc").value,
                 task_type: getCustomSelectValue("select-task-type"),
                 schedule_value: document.getElementById("task-value").value.trim(),
-                target_umo: document.getElementById("task-umo").value.trim(),
+                is_global: scope.is_global,
+                target_umo: scope.target_umo,
                 context_history_limit: parseInt(document.getElementById("task-context").value) || 5
             };
         } else if (type === "keyword_trigger") {
+            const scope = getScopeValue("trigger");
             payload = {
                 keyword: document.getElementById("trigger-keyword").value.trim(),
                 task_description: document.getElementById("trigger-desc").value,
                 context_history_limit: parseInt(document.getElementById("trigger-context").value) || 5,
-                target_umo: document.getElementById("trigger-umo").value.trim()
+                is_global: scope.is_global,
+                target_umo: scope.target_umo
             };
         }
         
@@ -352,7 +451,8 @@ async function init() {
                 showToast("请输入备忘录内容", true);
                 return;
             }
-            if (isNaN(payload.minutes_later) || payload.minutes_later <= 0) {
+            const isPermanentChecked = document.getElementById("status-is-permanent").checked;
+            if (!isPermanentChecked && (isNaN(payload.minutes_later) || payload.minutes_later <= 0)) {
                 showToast("请输入有效的正整数时长", true);
                 return;
             }
@@ -494,14 +594,16 @@ async function init() {
                     statusBody.innerHTML = memoKeys.map(key => {
                         const memo = allMemos[key];
                         const scope = memo.target_umo === "GLOBAL" ? "全局" : `当前会话 (${memo.target_umo})`;
-                        const isExpired = Date.now() / 1000 > memo.expire_timestamp;
-                        const remainingStr = isExpired ? "已失效" : getRemainingTime(memo.expire_timestamp);
+                        const isPermanent = memo.expire_timestamp <= 0;
+                        const isExpired = !isPermanent && (Date.now() / 1000 > memo.expire_timestamp);
+                        const remainingStr = isPermanent ? "永久有效" : (isExpired ? "已失效" : getRemainingTime(memo.expire_timestamp));
+                        const badgeClass = isPermanent ? "active-status" : (isExpired ? "failed" : "active-status");
                         
                         return `
                             <tr>
                                 <td class="cell-wrap">${escapeHtml(memo.content)}</td>
                                 <td>${escapeHtml(scope)}</td>
-                                <td><span class="status-badge ${isExpired ? 'failed' : 'active-status'}">${remainingStr}</span></td>
+                                <td><span class="status-badge ${badgeClass}">${remainingStr}</span></td>
                                 <td>
                                     <div class="actions-cell">
                                         <button class="btn btn-edit edit-memo-btn" data-id="${key}">编辑</button>
@@ -519,13 +621,13 @@ async function init() {
                 if (taskKeys.length === 0) {
                     tasksBody.innerHTML = `
                         <tr>
-                            <td colspan="6" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
+                            <td colspan="7" class="table-empty">暂无定时任务，AI 可以在聊天中自主添加提醒任务或在上方手动添加。</td>
                         </tr>
                     `;
                 } else {
                     tasksBody.innerHTML = taskKeys.map(key => {
                         const task = allTasks[key];
-                        const typeCN = { "one_off": "单次", "daily": "每日", "interval": "周期性间隔" };
+                        const typeCN = { "one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "周期性间隔" };
                         const statusCN = { "pending": "等待生成", "generating": "正在生成", "ready": "生成就绪", "failed": "生成失败" };
                         
                         let schedValueDisplay = task.scheduled_time;
@@ -533,11 +635,21 @@ async function init() {
                             schedValueDisplay += " 分钟";
                         }
                         
+                        let nextRunDisplay = "—";
+                        if (task.trigger_timestamp) {
+                            const dt = new Date(task.trigger_timestamp * 1000);
+                            if (!isNaN(dt.getTime())) {
+                                const pad = (n) => String(n).padStart(2, "0");
+                                nextRunDisplay = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+                            }
+                        }
+                        
                         return `
                             <tr>
                                 <td class="cell-wrap">${escapeHtml(task.task_description)}</td>
                                 <td><span class="type-indicator">${typeCN[task.type] || task.type}</span></td>
                                 <td>${schedValueDisplay}</td>
+                                <td>${nextRunDisplay}</td>
                                 <td><code style="font-family: monospace;">${escapeHtml(task.target_umo)}</code></td>
                                 <td><span class="status-badge ${task.status}">${statusCN[task.status] || task.status}</span></td>
                                 <td>
