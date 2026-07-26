@@ -296,6 +296,12 @@ async function init() {
         return { is_global: isGlobal, target_umo: target_umo };
     }
 
+    function formatScopeDisplay(umo) {
+        if (!umo || umo === "GLOBAL") return "全平台全局";
+        if (umo.toUpperCase().startsWith("GLOBAL:")) return `用户全局 (用户: ${umo.slice(7)})`;
+        return `指定会话 (${umo})`;
+    }
+
     ["status", "task", "trigger"].forEach(prefix => {
         const cb = document.getElementById(`${prefix}-is-global`);
         if (cb) {
@@ -593,7 +599,7 @@ async function init() {
                 } else {
                     statusBody.innerHTML = memoKeys.map(key => {
                         const memo = allMemos[key];
-                        const scope = memo.target_umo === "GLOBAL" ? "全局" : `当前会话 (${memo.target_umo})`;
+                        const scope = formatScopeDisplay(memo.target_umo);
                         const isPermanent = memo.expire_timestamp <= 0;
                         const isExpired = !isPermanent && (Date.now() / 1000 > memo.expire_timestamp);
                         const remainingStr = isPermanent ? "永久有效" : (isExpired ? "已失效" : getRemainingTime(memo.expire_timestamp));
@@ -650,7 +656,7 @@ async function init() {
                                 <td><span class="type-indicator">${typeCN[task.type] || task.type}</span></td>
                                 <td>${schedValueDisplay}</td>
                                 <td>${nextRunDisplay}</td>
-                                <td><code style="font-family: monospace;">${escapeHtml(task.target_umo)}</code></td>
+                                <td>${escapeHtml(formatScopeDisplay(task.target_umo))}</td>
                                 <td><span class="status-badge ${task.status}">${statusCN[task.status] || task.status}</span></td>
                                 <td>
                                     <div class="actions-cell">
@@ -675,7 +681,7 @@ async function init() {
                 } else {
                     triggersBody.innerHTML = triggerKeys.map(key => {
                         const trigger = allTriggers[key];
-                        const scope = trigger.target_umo === "GLOBAL" ? "全局" : `当前会话 (${trigger.target_umo})`;
+                        const scope = formatScopeDisplay(trigger.target_umo);
                         
                         return `
                             <tr>
