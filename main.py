@@ -11,67 +11,90 @@ from astrbot.api import logger
 from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.provider import ProviderRequest
-from astrbot.api.star import StarTools  # 导入标准的 StarTools 模块
+from astrbot.api.star import StarTools
+
 
 def get_next_daily_timestamp(time_str: str) -> float:
-    """根据 HH:MM 获取下一次的绝对时间戳（如果是今天已过，则为明天）"""
+    """根据 HH:MM 获取下一次的绝对时间戳（如果今天已过，则为明天）"""
+    hour, minute = 12, 0
     try:
-        parts = time_str.strip().split(":")
-        hour = int(parts[0])
-        minute = int(parts[1])
+        parts = str(time_str).strip().split(":")
+        h = int(parts[0])
+        m = int(parts[1])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            hour, minute = h, m
     except Exception:
-        hour, minute = 12, 0  # 默认兜底
-    
+        pass
+
     now = datetime.now()
-    target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    try:
+        target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except ValueError:
+        target_dt = now.replace(hour=12, minute=0, second=0, microsecond=0)
+
     if target_dt <= now:
         target_dt += timedelta(days=1)
     return target_dt.timestamp()
+
+
+def get_next_workday_timestamp(time_str: str) -> float:
+    """根据 HH:MM 获取下一次工作日（周一至周五）的绝对时间戳"""
+    hour, minute = 12, 0
+    try:
+        parts = str(time_str).strip().split(":")
+        h = int(parts[0])
+        m = int(parts[1])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            hour, minute = h, m
+    except Exception:
+        pass
+
+    now = datetime.now()
+    try:
+        target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except ValueError:
+        target_dt = now.replace(hour=12, minute=0, second=0, microsecond=0)
+
+    if target_dt <= now:
+        target_dt += timedelta(days=1)
+
+    # 5 代表周六，6 代表周日
+    while target_dt.weekday() >= 5:
+        target_dt += timedelta(days=1)
+
+    return target_dt.timestamp()
+
 
 def _extract_event_ids(event) -> tuple:
     """提取 event 中的 (group_id, sender_id, umo_str)"""
     umo_str = str(event.unified_msg_origin) if (event and hasattr(event, "unified_msg_origin")) else ""
     group_id = ""
     sender_id = ""
-    
+
     if event and hasattr(event, "message_obj") and event.message_obj:
         msg_obj = event.message_obj
         if hasattr(msg_obj, "group_id") and msg_obj.group_id:
             group_id = str(msg_obj.group_id).strip()
-        if hasattr(msg_obj, "sender") and msg_obj.sender and hasattr(msg_obj.sender, "user_id") and msg_obj.sender.user_id:
+        if (
+            hasattr(msg_obj, "sender")
+            and msg_obj.sender
+            and hasattr(msg_obj.sender, "user_id")
+            and msg_obj.sender.user_id
+        ):
             sender_id = str(msg_obj.sender.user_id).strip()
-            
+
     if not group_id:
         m = re.search(r'GroupMessage:(\w+)', umo_str, re.IGNORECASE)
         if m:
             group_id = m.group(1).strip()
-            
+
     if not sender_id:
-        m = re.search(r'PrivateMessage:(\w+)', umo_str, re.IGNORECASE)
+        m = re.search(r'(?:PrivateMessage|FriendMessage):(\w+)', umo_str, re.IGNORECASE)
         if m:
             sender_id = m.group(1).strip()
-            
+
     return group_id, sender_id, umo_str
 
-def get_next_workday_timestamp(time_str: str) -> float:
-    """根据 HH:MM 获取下一次工作日（周一至周五）的绝对时间戳"""
-    try:
-        parts = time_str.strip().split(":")
-        hour = int(parts[0])
-        minute = int(parts[1])
-    except Exception:
-        hour, minute = 12, 0  # 默认兜底
-    
-    now = datetime.now()
-    target_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target_dt <= now:
-        target_dt += timedelta(days=1)
-    
-    # 5 代表周六，6 代表周日
-    while target_dt.weekday() >= 5:
-        target_dt += timedelta(days=1)
-        
-    return target_dt.timestamp()
 
 @register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.3.1")
 class AIMemoPlugin(Star):
@@ -81,25 +104,29 @@ class AIMemoPlugin(Star):
         self.poll_interval = int(self.config.get("poll_interval", 15))
         self.allow_global_memo = bool(self.config.get("allow_global_memo", True))
         self.trigger_mode = self.config.get("trigger_mode", "tool")
-        
+
         # XML 模式下的正则匹配器与属性提取器
-        self.memo_tag_pattern = re.compile(r'<ai_memo\b([^>]*?)(?:/>|>(.*?)</ai_memo>)', re.DOTALL | re.IGNORECASE)
+        self.memo_tag_pattern = re.compile(
+            r'<ai_memo\b([^>]*?)(?:/>|>(.*?)</ai_memo>)', re.DOTALL | re.IGNORECASE
+        )
         self.attr_pattern = re.compile(r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|([^\s/>]+))')
-        self._index_to_item = {}
+
+        # 按会话隔离的序号映射列表，格式: { umo: { "1": (type, key), ... } }
+        self._session_index_to_item = {}
 
         # 协程安全同步锁，防止高并发时 JSON 读写冲突和文件损坏
         self.lock = asyncio.Lock()
 
-        # 规范化：使用 AstrBot 官方标准的持久化目录，防止重装/热更新时丢失数据 [已修正]
+        # 规范化：使用 AstrBot 官方标准的持久化目录
         self.data_dir = str(StarTools.get_data_dir("astrbot_plugin_instant_memo"))
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir, exist_ok=True)
-            
+
         self.data_file = os.path.join(self.data_dir, "memos.json")
         self.data = {}
         self._load_data()
-        
-        # 在 __init__ 中直接启动后台异步轮询任务是正确的
+
+        # 启动后台异步轮询任务
         self.poll_task = asyncio.create_task(self._polling_loop())
 
         # 注册前端 Web API
@@ -107,59 +134,59 @@ class AIMemoPlugin(Star):
             "/astrbot_plugin_instant_memo/get_data",
             self.web_get_data,
             ["GET"],
-            "获取备忘录条目与当前设置"
+            "获取备忘录条目与当前设置",
         )
         context.register_web_api(
             "/astrbot_plugin_instant_memo/save_config",
             self.web_save_config,
             ["POST"],
-            "保存备忘录插件配置"
+            "保存备忘录插件配置",
         )
         context.register_web_api(
             "/astrbot_plugin_instant_memo/add_item",
             self.web_add_item,
             ["POST"],
-            "手动添加备忘条目"
+            "手动添加备忘条目",
         )
         context.register_web_api(
             "/astrbot_plugin_instant_memo/update_item",
             self.web_update_item,
             ["POST"],
-            "手动修改备忘条目"
+            "手动修改备忘条目",
         )
         context.register_web_api(
             "/astrbot_plugin_instant_memo/delete_item",
             self.web_delete_item,
             ["POST"],
-            "删除指定备忘条目"
+            "删除指定备忘条目",
         )
 
     def _match_umo(self, target_umo: str, event) -> bool:
-        """匹配当前消息事件是否符合 target_umo 作用域规则"""
+        """匹配当前消息事件是否符合 target_umo 作用域规则（严格精确匹配，避免越权放大）"""
         if not target_umo or not event:
             return True
-            
+
         t_clean = str(target_umo).strip()
         if not t_clean or t_clean.upper() in ["GLOBAL", "ALL", "*"]:
             return True
-            
+
         group_id, sender_id, umo_str = _extract_event_ids(event)
-        
+
         rules = [r.strip() for r in re.split(r'[;\n]+', t_clean) if r.strip()]
         if not rules:
             return True
-            
+
         for rule in rules:
             if rule.upper() in ["GLOBAL", "ALL", "*"]:
                 return True
-                
+
             if ":" in rule:
                 parts = rule.split(":", 1)
                 g_part = parts[0].strip()
                 u_part = parts[1].strip()
-                
+
                 target_users = set(u.strip() for u in re.split(r'[\s,，]+', u_part) if u.strip())
-                
+
                 if g_part.upper() in ["GLOBAL", "ALL", "*"]:
                     if not target_users or (sender_id and sender_id in target_users):
                         return True
@@ -173,17 +200,18 @@ class AIMemoPlugin(Star):
                 target_ids = set(item.strip() for item in re.split(r'[\s,，]+', rule) if item.strip())
                 if not target_ids:
                     return True
-                    
+
                 for tid in target_ids:
                     if tid.upper() in ["GLOBAL", "ALL", "*"]:
                         return True
+                    # 必须精确匹配群号、发送者或完整 UMO 字符串，不再盲目子串匹配 (已修复 Bug 5)
                     if group_id and group_id == tid:
                         return True
                     if sender_id and sender_id == tid:
                         return True
-                    if tid in umo_str or umo_str in tid:
+                    if umo_str and umo_str == tid:
                         return True
-                        
+
         return False
 
     def on_config_update(self, config: dict):
@@ -196,10 +224,14 @@ class AIMemoPlugin(Star):
         self.trigger_mode = self.config.get("trigger_mode", "tool")
         logger.info(f"[InstantMemo] 配置已更新，当前触发模式为: {self.trigger_mode}")
 
-    def terminate(self):
-        """生命周期结束时，安全取消后台轮询协程防止报错"""
-        if hasattr(self, "poll_task") and self.poll_task:
+    async def terminate(self):
+        """生命周期结束时，安全取消后台轮询协程防止报错 (修复为 async def)"""
+        if hasattr(self, "poll_task") and self.poll_task and not self.poll_task.done():
             self.poll_task.cancel()
+            try:
+                await self.poll_task
+            except asyncio.CancelledError:
+                pass
 
     def _load_data(self):
         """加载 JSON 数据 (初始化时同步加载)"""
@@ -211,12 +243,18 @@ class AIMemoPlugin(Star):
                         self.data = loaded_data
             except Exception as e:
                 logger.error(f"[InstantMemo] 读取数据文件失败，将使用默认空数据: {e}")
-                
+
         # 基础数据表初始化
         self.data.setdefault("status_memos", {})
-        self.data.setdefault("tasks", {})
+        tasks_data = self.data.setdefault("tasks", {})
         self.data.setdefault("keyword_triggers", {})
-        
+
+        # 重启后将卡在 generating 状态的任务自动复位为 pending (已修复 Bug 2)
+        for t_id, task in list(tasks_data.items()):
+            if isinstance(task, dict) and task.get("status") == "generating":
+                task["status"] = "pending"
+                logger.info(f"[InstantMemo] 重启自动复位生成卡死的任务: {t_id}")
+
         # 兼容层数据迁移
         if "active_tasks" in self.data:
             old_tasks = self.data.pop("active_tasks")
@@ -230,7 +268,7 @@ class AIMemoPlugin(Star):
                     "trigger_timestamp": o_task.get("trigger_timestamp", time.time() + 300),
                     "status": "pending",
                     "generated_message": o_task.get("exact_message_to_send", ""),
-                    "last_run_timestamp": 0.0
+                    "last_run_timestamp": 0.0,
                 }
             self._save_data_sync()
             logger.info("[InstantMemo] 检测到旧版本数据，已自动迁移至新版任务管理中。")
@@ -255,30 +293,32 @@ class AIMemoPlugin(Star):
                         json.dump(self.data, f, ensure_ascii=False, indent=4)
                 except Exception as e:
                     logger.error(f"[InstantMemo] 保存数据文件失败: {e}")
+
             await asyncio.to_thread(save)
 
     def _get_all_items(self) -> list:
         """获取所有状态备忘录、定时任务和关键词搭话，排序并返回"""
         items = []
-        
+
         memos_data = self.data.get("status_memos", {})
         for m_id, memo in sorted(memos_data.items(), key=lambda x: x[1].get("expire_timestamp", 0)):
             items.append({"type": "status_memo", "key": m_id, "data": memo})
-            
+
         tasks_data = self.data.get("tasks", {})
         for t_id, task in sorted(tasks_data.items(), key=lambda x: x[1].get("trigger_timestamp", 0)):
             items.append({"type": "task", "key": t_id, "data": task})
-            
+
         triggers_data = self.data.get("keyword_triggers", {})
-        for tg_id, trigger in sorted(triggers_data.items(), key=lambda x: x[1].get("keyword", "")):
+        for tg_id, trigger in sorted(triggers_data.items(), key=lambda x: str(x[1].get("keyword", ""))):
             items.append({"type": "keyword_trigger", "key": tg_id, "data": trigger})
-            
+
         return items
 
-    def _get_item_by_index(self, index_str: str):
-        """通过序号（如 1）或 8位/全量 UUID 获取备忘录/任务/搭话数据"""
-        if hasattr(self, "_index_to_item") and index_str in self._index_to_item:
-            item_type, key = self._index_to_item[index_str]
+    def _get_item_by_index(self, index_str: str, umo_key: str = "DEFAULT"):
+        """通过序号（如 1）或 8位/全量 UUID 获取备忘录/任务/搭话数据（隔离会话缓存，修复 Bug 9）"""
+        sess_index = self._session_index_to_item.get(umo_key, {})
+        if index_str in sess_index:
+            item_type, key = sess_index[index_str]
             if item_type == "status_memo" and key in self.data.get("status_memos", {}):
                 return item_type, key, self.data["status_memos"][key]
             elif item_type == "task" and key in self.data.get("tasks", {}):
@@ -287,7 +327,7 @@ class AIMemoPlugin(Star):
                 return item_type, key, self.data["keyword_triggers"][key]
 
         items = self._get_all_items()
-        
+
         try:
             idx = int(index_str) - 1
             if 0 <= idx < len(items):
@@ -295,45 +335,76 @@ class AIMemoPlugin(Star):
                 return item["type"], item["key"], item["data"]
         except ValueError:
             pass
-            
+
         index_str_clean = index_str.strip()
         for item in items:
             key = item["key"]
             if key == index_str_clean or key.startswith(index_str_clean):
                 return item["type"], key, item["data"]
-                
+
         return None, None, None
+
+    async def _check_is_admin(self, event: AstrMessageEvent) -> bool:
+        """安全校验发送者是否具有 Bot 管理员权限"""
+        if not event:
+            return True
+        if hasattr(event, "role") and str(event.role).lower() in ["admin", "owner", "administrator"]:
+            return True
+        if hasattr(event, "is_admin"):
+            try:
+                res = event.is_admin()
+                if asyncio.iscoroutine(res):
+                    res = await res
+                if res:
+                    return True
+            except Exception:
+                pass
+        sender_id = event.get_sender_id() if hasattr(event, "get_sender_id") else None
+        if sender_id:
+            admins = getattr(self.context, "admins", []) or []
+            if str(sender_id).strip() in [str(a).strip() for a in admins]:
+                return True
+        return False
 
     @filter.command("memo")
     async def memo_cmd(self, event: AstrMessageEvent):
-        """备忘录、定时任务和关键词搭话管理指令"""
+        """备忘录、定时任务和关键词搭话管理指令（包含管理员鉴权保护，已修复安全中危 1）"""
+        # 管理员鉴权拦截
+        if not await self._check_is_admin(event):
+            yield event.plain_result("❌ 权限不足：只有 Bot 管理员才能使用 /memo 管理指令。")
+            return
+
         text = event.message_str.strip()
         if text.startswith("/memo"):
             text = text[5:].strip()
         elif text.startswith("memo"):
             text = text[4:].strip()
-            
+
         parts = text.split(None, 3)
         action = parts[0].lower() if parts else "list"
-        
+        umo_key = event.unified_msg_origin if event else "DEFAULT"
+
         if action in ["list", "show", "列出", "列表"]:
             items = self._get_all_items()
-            self._index_to_item = {str(i + 1): (item["type"], item["key"]) for i, item in enumerate(items)}
-            
+            # 按会话隔离存储映射关系 (修复 Bug 9)
+            self._session_index_to_item[umo_key] = {
+                str(i + 1): (item["type"], item["key"]) for i, item in enumerate(items)
+            }
+
             if not items:
                 yield event.plain_result("🍵 目前没有任何备忘录、定时任务或关键词搭话。")
                 return
-                
+
             memos = []
             tasks = []
             triggers = []
-            
+
             for i, item in enumerate(items):
                 idx_str = f"[{i + 1}]"
                 data = item["data"]
                 key = item["key"]
                 short_id = key[:8]
-                
+
                 if item["type"] == "status_memo":
                     exp_t = data.get("expire_timestamp", 0)
                     if exp_t <= 0:
@@ -343,19 +414,23 @@ class AIMemoPlugin(Star):
                         remaining_str = f"{remaining} 分钟后过期" if remaining > 0 else "已过期"
                     scope = "全局" if data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
                     memos.append(f"{idx_str} ID: {short_id} | 内容: {data.get('content')} ({remaining_str}, {scope})")
-                    
+
                 elif item["type"] == "task":
                     t_type = data.get("type", "one_off")
-                    type_cn = {"one_off": "单次", "daily": "每日", "interval": "间隔"}
+                    type_cn = {"one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "间隔"}
                     trigger_t = data.get("trigger_timestamp", 0)
                     time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
                     status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪", "failed": "失败"}
-                    tasks.append(f"{idx_str} ID: {short_id} | [{type_cn.get(t_type, t_type)}] 描述: {data.get('task_description')} (下一次触发: {time_str}, 状态: {status_cn.get(data.get('status'), '未知')})")
-                    
+                    tasks.append(
+                        f"{idx_str} ID: {short_id} | [{type_cn.get(t_type, t_type)}] 描述: {data.get('task_description')} (下一次触发: {time_str}, 状态: {status_cn.get(data.get('status'), '未知')})"
+                    )
+
                 elif item["type"] == "keyword_trigger":
                     scope = "全局" if data.get("is_global") or data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
-                    triggers.append(f"{idx_str} ID: {short_id} | 关键词: \"{data.get('keyword')}\" -> 设定: {data.get('task_description')} ({scope})")
-                    
+                    triggers.append(
+                        f"{idx_str} ID: {short_id} | 关键词: \"{data.get('keyword')}\" -> 设定: {data.get('task_description')} ({scope})"
+                    )
+
             result_parts = ["📋 === AI 备忘录/任务/监听 列表 ==="]
             if memos:
                 result_parts.append("📌 【临时人设/状态备忘录】\n" + "\n".join(memos))
@@ -363,22 +438,22 @@ class AIMemoPlugin(Star):
                 result_parts.append("⏰ 【定时提醒与周期计划】\n" + "\n".join(tasks))
             if triggers:
                 result_parts.append("🔑 【关键词主动监听搭话】\n" + "\n".join(triggers))
-                
+
             result_parts.append("\n💡 提示：使用 `/memo del <序号>` 删除条目，`/memo edit <序号> <属性> <新值>` 修改属性。")
             yield event.plain_result("\n\n".join(result_parts))
             return
-            
+
         elif action in ["del", "delete", "删除", "remove", "rm"]:
             if len(parts) < 2:
                 yield event.plain_result("❌ 用法：/memo del <序号>")
                 return
-                
+
             index_or_id = parts[1]
-            item_type, key, data = self._get_item_by_index(index_or_id)
+            item_type, key, data = self._get_item_by_index(index_or_id, umo_key)
             if not key:
                 yield event.plain_result(f"❌ 未找到序号/ID 为 '{index_or_id}' 的备忘录/任务/搭话。")
                 return
-                
+
             if item_type == "status_memo":
                 content = self.data["status_memos"].pop(key)["content"]
                 await self._save_data()
@@ -392,41 +467,46 @@ class AIMemoPlugin(Star):
                 await self._save_data()
                 yield event.plain_result(f"✅ 已成功删除关键词 '{keyword}' 的搭话监听。")
             return
-            
+
         elif action in ["edit", "modify", "修改", "update"]:
             if len(parts) < 4:
                 yield event.plain_result(
                     "❌ 用法：/memo edit <序号> <属性> <新值>\n\n"
                     "💡 支持修改的属性：\n"
-                    "- 状态备忘录：content(内容), expire(时间/分钟或填永久), global(是否全局)\n"
-                    "- 定时任务：desc(描述), value(触发时间), type(类型:one_off/daily/interval)\n"
+                    "- 状态备忘录：content(内容), expire(时间/分钟或填0永久), global(是否全局)\n"
+                    "- 定时任务：desc(描述), value(触发时间), type(类型:one_off/daily/workday/interval)\n"
                     "- 关键词搭话：keyword(触发词), desc(回复设定), global(是否全局)"
                 )
                 return
-                
+
             index_or_id = parts[1]
             field = parts[2].lower()
             val = parts[3].strip()
-            
-            item_type, key, data = self._get_item_by_index(index_or_id)
+
+            item_type, key, data = self._get_item_by_index(index_or_id, umo_key)
             if not key:
                 yield event.plain_result(f"❌ 未找到序号/ID 为 '{index_or_id}' 的备忘录/任务/搭话。")
                 return
-                
+
             if item_type == "status_memo":
                 if field in ["content", "内容"]:
-                    old_val = data["content"]
+                    old_val = data.get("content", "")
                     data["content"] = val
                     await self._save_data()
                     yield event.plain_result(f"✅ 已将状态备忘录内容从 '{old_val}' 修改为 '{val}'。")
                 elif field in ["expire", "time", "时间", "过期时间"]:
                     try:
                         mins = int(val)
-                        data["expire_timestamp"] = time.time() + mins * 60
-                        await self._save_data()
-                        yield event.plain_result(f"✅ 已更新状态备忘录时间，将在 {mins} 分钟后过期。")
+                        if mins <= 0:
+                            data["expire_timestamp"] = -1.0  # 修复 Bug 10：0 或 -1 代表永久有效
+                            await self._save_data()
+                            yield event.plain_result("✅ 已将状态备忘录时间修改为永久有效。")
+                        else:
+                            data["expire_timestamp"] = time.time() + mins * 60
+                            await self._save_data()
+                            yield event.plain_result(f"✅ 已更新状态备忘录时间，将在 {mins} 分钟后过期。")
                     except ValueError:
-                        yield event.plain_result("❌ 时间参数必须是整数（分钟数）。")
+                        yield event.plain_result("❌ 时间参数必须是整数（分钟数，0表示永久）。")
                 elif field in ["global", "全局"]:
                     is_global = val.lower() in ["true", "y", "yes", "1", "是"]
                     data["target_umo"] = "GLOBAL" if is_global else event.unified_msg_origin
@@ -434,10 +514,10 @@ class AIMemoPlugin(Star):
                     yield event.plain_result(f"✅ 已将状态备忘录作用域修改为：{'全局' if is_global else '当前会话'}。")
                 else:
                     yield event.plain_result(f"❌ 状态备忘录不支持修改属性 '{field}'。可修改属性: content, expire, global")
-                    
+
             elif item_type == "task":
                 if field in ["desc", "description", "描述", "内容"]:
-                    old_val = data["task_description"]
+                    old_val = data.get("task_description", "")
                     data["task_description"] = val
                     await self._save_data()
                     yield event.plain_result(f"✅ 已将定时任务描述从 '{old_val}' 修改为 '{val}'。")
@@ -469,7 +549,7 @@ class AIMemoPlugin(Star):
                         except ValueError:
                             yield event.plain_result("❌ 错误：对于周期循环(interval)，时间值必须为整数（分钟数）。")
                             return
-                    
+
                     data["scheduled_time"] = val
                     data["trigger_timestamp"] = trigger_time
                     data["status"] = "pending"
@@ -499,20 +579,22 @@ class AIMemoPlugin(Star):
                         data["status"] = "pending"
                         data["generated_message"] = ""
                     except Exception:
-                        yield event.plain_result(f"⚠️ 类型已修改为 '{val_clean}'，但由于现有的时间值 '{val_s}' 不兼容，请修改 time/value 属性。")
+                        yield event.plain_result(
+                            f"⚠️ 类型已修改为 '{val_clean}'，但由于现有的时间值 '{val_s}' 不兼容，请修改 time/value 属性。"
+                        )
                     await self._save_data()
                     yield event.plain_result(f"✅ 已将任务类型修改为 '{val_clean}'。")
                 else:
                     yield event.plain_result(f"❌ 定时任务不支持修改属性 '{field}'。可修改属性: desc, value, type")
-                    
+
             elif item_type == "keyword_trigger":
                 if field in ["keyword", "关键词", "触发词"]:
-                    old_val = data["keyword"]
+                    old_val = data.get("keyword", "")
                     data["keyword"] = val
                     await self._save_data()
                     yield event.plain_result(f"✅ 已将监听关键词从 '{old_val}' 修改为 '{val}'。")
                 elif field in ["desc", "description", "描述", "设定"]:
-                    old_val = data["task_description"]
+                    old_val = data.get("task_description", "")
                     data["task_description"] = val
                     await self._save_data()
                     yield event.plain_result(f"✅ 已将接话语气描述从 '{old_val}' 修改为 '{val}'。")
@@ -528,7 +610,7 @@ class AIMemoPlugin(Star):
         else:
             yield event.plain_result(
                 "📋 === AI 备忘录管理系统 ===\n\n"
-                "💡 可用指令：\n"
+                "💡 可用指令（限管理员）：\n"
                 "- /memo 或 /memo list : 列出所有备忘录、定时任务与搭话监听器\n"
                 "- /memo del <序号> : 删除指定的条目\n"
                 "- /memo edit <序号> <属性> <新值> : 修改指定条目的属性\n\n"
@@ -540,15 +622,19 @@ class AIMemoPlugin(Star):
             return
 
     async def _get_umo_history(self, umo: str, limit: int) -> list:
+        if limit <= 0:
+            return []
         try:
-            conv_mgr = self.context.conversation_manager
+            conv_mgr = getattr(self.context, "conversation_manager", None)
+            if not conv_mgr:
+                return []
             curr_cid = await conv_mgr.get_curr_conversation_id(umo)
             if not curr_cid:
                 return []
             conversation = await conv_mgr.get_conversation(umo, curr_cid)
             if not conversation or not conversation.history:
                 return []
-            
+
             if isinstance(conversation.history, str):
                 try:
                     history_list = json.loads(conversation.history)
@@ -558,10 +644,10 @@ class AIMemoPlugin(Star):
                 history_list = conversation.history
             else:
                 history_list = []
-                
+
             if not history_list:
                 return []
-                
+
             normalized = []
             for msg in history_list[-limit:]:
                 content = msg.get("content", "")
@@ -573,19 +659,24 @@ class AIMemoPlugin(Star):
                         else:
                             text_parts.append(str(part))
                     content = "".join(text_parts)
-                normalized.append({
-                    "role": msg.get("role", "user"),
-                    "content": str(content)
-                })
+                normalized.append({"role": msg.get("role", "user"), "content": str(content)})
             return normalized
         except Exception as e:
             logger.error(f"[InstantMemo] 获取 UMO {umo} 历史会话失败: {e}")
             return []
 
     # ========================== 工具 1：状态/人设备忘录 ==========================
-    
+
     @llm_tool(name="set_status_memo")
-    async def set_status_memo(self, event: AstrMessageEvent, content: str, minutes_later: int = 60, is_global: bool = False, memo_id: str = "", target_umo: str = "") -> str:
+    async def set_status_memo(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        minutes_later: int = 60,
+        is_global: bool = False,
+        memo_id: str = "",
+        target_umo: str = "",
+    ) -> str:
         """记录/修改 AI 自我状态/人设备忘录，有效期内注入 System Prompt。
 
         Args:
@@ -595,12 +686,6 @@ class AIMemoPlugin(Star):
             memo_id (string, optional): 已有备忘录 ID(前8位亦可)，传入则覆盖更新而非新建。
             target_umo (string, optional): 作用域(如 '123', '123:456,678', 'GLOBAL:456')。
         """
-        if not self._is_allowed(event, "add", "status_memo"):
-            return "[后台隐蔽消息] 新增状态备忘的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
-
-        if is_global and not self.allow_global_memo:
-            is_global = False
-            
         memos_data = self.data.setdefault("status_memos", {})
         target_id = None
         if memo_id:
@@ -612,14 +697,23 @@ class AIMemoPlugin(Star):
                     if real_id.startswith(m_clean):
                         target_id = real_id
                         break
-                        
+
         is_update = target_id is not None
+        action_type = "update" if is_update else "add"
+
+        if not self._is_allowed(event, action_type, "status_memo"):
+            return f"[后台提示] 操作已被配置拦截禁用。"
+
+        if is_global and not self.allow_global_memo:
+            is_global = False
+
         if not is_update:
             target_id = str(uuid.uuid4())
 
-        # 校验永久有效参数 (-1, 0, permanent, 永久)
         mins_str = str(minutes_later).strip().lower()
-        if mins_str in ["-1", "0", "permanent", "永久", "inf"] or (isinstance(minutes_later, (int, float)) and minutes_later <= 0):
+        if mins_str in ["-1", "0", "permanent", "永久", "inf"] or (
+            isinstance(minutes_later, (int, float)) and minutes_later <= 0
+        ):
             expire_time = -1.0
             dur_info = "永久有效"
         else:
@@ -645,12 +739,12 @@ class AIMemoPlugin(Star):
         memos_data[target_id] = {
             "content": content,
             "expire_timestamp": expire_time,
-            "target_umo": final_umo
+            "target_umo": final_umo,
         }
         await self._save_data()
-        
+
         action_str = "修改更新" if is_update else "记录"
-        return f"[后台隐蔽消息] 已成功{action_str}状态备忘录(ID: {target_id[:8]}，{dur_info}，作用域: {final_umo})。请【严格隐秘存储】，完全以人设身份正常回复用户，【严禁】在回复中向用户暴露备忘录内容、备忘ID或输出系统确认话术！"
+        return f"[后台提示] 已成功{action_str}状态备忘录(ID: {target_id[:8]}，{dur_info}，作用域: {final_umo})。"
 
     @llm_tool(name="delete_status_memo")
     async def delete_status_memo(self, event: AstrMessageEvent, memo_id: str) -> str:
@@ -660,49 +754,55 @@ class AIMemoPlugin(Star):
             memo_id (string): 要删除的状态备忘录 ID 或前 8 位短 ID。
         """
         if not self._is_allowed(event, "delete", "status_memo"):
-            return "[后台隐蔽消息] 删除状态备忘的操作已被管理员禁用。请保持人设回复用户。"
+            return "[后台提示] 删除状态备忘的操作已被禁用。"
 
         m_id_clean = memo_id.strip()
         memos_data = self.data.setdefault("status_memos", {})
-        
+
         if m_id_clean in memos_data:
-            content = memos_data.pop(m_id_clean)["content"]
+            content = memos_data.pop(m_id_clean).get("content", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除状态备忘录：'{content}'。请保持人设回复用户。"
-            
+            return f"[后台提示] 已成功删除状态备忘录：'{content}'。"
+
         matched_id = None
         for real_id in memos_data:
             if real_id.startswith(m_id_clean):
                 matched_id = real_id
                 break
         if matched_id:
-            content = memos_data.pop(matched_id)["content"]
+            content = memos_data.pop(matched_id).get("content", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除状态备忘录：'{content}'。请保持人设回复用户。"
-            
-        return f"[后台隐蔽消息] 未找到 ID 为 '{memo_id}' 的状态备忘录。"
+            return f"[后台提示] 已成功删除状态备忘录：'{content}'。"
+
+        return f"[后台提示] 未找到 ID 为 '{memo_id}' 的状态备忘录。"
 
     # ========================== 工具 2：主动定时任务 ==========================
 
     @llm_tool(name="set_scheduled_task")
-    async def set_scheduled_task(self, event: AstrMessageEvent, task_description: str, task_type: str, schedule_value: str, context_history_limit: int = 5, task_id: str = "", is_global: bool = False, target_umo: str = "") -> str:
+    async def set_scheduled_task(
+        self,
+        event: AstrMessageEvent,
+        task_description: str,
+        task_type: str,
+        schedule_value: str,
+        context_history_limit: Optional[int] = None,
+        task_id: str = "",
+        is_global: bool = False,
+        target_umo: str = "",
+        exact_message_to_send: str = "",
+    ) -> str:
         """设立/修改定时提醒或循环任务(主动推送消息)。
 
         Args:
             task_description (string): 任务描述。
             task_type (string): 'one_off'(单次)|'daily'(每日)|'workday'(工作日)|'interval'(周期循环)。
             schedule_value (string): one_off/interval 填分钟数(如'30')；daily/workday 填 HH:MM(如'12:30')。
-            context_history_limit (number, optional): 触发时携带的上下文条数。默认 5。
+            context_history_limit (number, optional): 触发时携带的上下文条数。
             task_id (string, optional): 已有任务 ID(前8位亦可)，传入则更新而非新建。
             is_global (boolean, optional): 是否全局广播。默认 False。
             target_umo (string, optional): 推送目标作用域。
+            exact_message_to_send (string, optional): 选填，触发时要发送的具体固定消息。
         """
-        if not self._is_allowed(event, "add", "task"):
-            return "[后台隐蔽消息] 创建定时提醒任务的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
-
-        if context_history_limit == 5:
-            context_history_limit = self.config.get("context_history_limit", 5)
-
         tasks_data = self.data.setdefault("tasks", {})
         target_id = None
         if task_id:
@@ -715,18 +815,31 @@ class AIMemoPlugin(Star):
                         target_id = real_id
                         break
         is_update = target_id is not None
+        action_type = "update" if is_update else "add"
+
+        # 校验 AI 权限与全局广播许可 (已修复 Bug 7 & 8)
+        if not self._is_allowed(event, action_type, "task"):
+            return f"[后台提示] 操作已被配置拦截禁用。"
+
+        if not self.allow_global_memo:
+            is_global = False
+            if target_umo and target_umo.upper().startswith("GLOBAL"):
+                target_umo = event.unified_msg_origin if event else ""
+
+        if context_history_limit is None:
+            context_history_limit = int(self.config.get("context_history_limit", 5))
+
         if not is_update:
             target_id = str(uuid.uuid4())
 
         current_time = time.time()
-        
         t_type = task_type.strip().lower()
         if t_type not in ["one_off", "daily", "workday", "interval"]:
             return "错误：task_type 参数必须是 'one_off'、'daily'、'workday' 或 'interval' 中的一个。"
-            
+
         trigger_time = 0.0
         val = schedule_value.strip()
-        
+
         def parse_minutes(value_str: str) -> Optional[int]:
             match = re.search(r'\d+', value_str)
             return int(match.group(0)) if match else None
@@ -756,10 +869,10 @@ class AIMemoPlugin(Star):
                         hours = int(match_single.group(1))
                         if 0 <= hours <= 23:
                             val = f"{hours:02d}:00"
-            
+
             if ":" not in val:
                 return f"错误：对于 {t_type} 定时任务，schedule_value 必须是 HH:MM 格式，例如 '12:00'。"
-            
+
             if t_type == "daily":
                 trigger_time = get_next_daily_timestamp(val)
             else:
@@ -775,14 +888,16 @@ class AIMemoPlugin(Star):
                     val = str(mins)
                 else:
                     return "错误：对于 interval 间隔循环，schedule_value 必须为整数代表间隔分钟（如 '60'）。"
-                
+
         final_umo = (target_umo or "").strip()
         if not final_umo:
             final_umo = "GLOBAL" if is_global else (event.unified_msg_origin if event else "GLOBAL")
         elif is_global and not final_umo.upper().startswith("GLOBAL:"):
             if final_umo.upper() != "GLOBAL":
                 final_umo = f"GLOBAL:{final_umo}"
-        
+
+        exact_msg = (exact_message_to_send or "").strip()
+
         tasks_data[target_id] = {
             "type": t_type,
             "task_description": task_description,
@@ -790,16 +905,16 @@ class AIMemoPlugin(Star):
             "context_history_limit": int(context_history_limit),
             "scheduled_time": val,
             "trigger_timestamp": trigger_time,
-            "status": "pending",
-            "generated_message": "",
-            "last_run_timestamp": 0.0
+            "status": "ready" if exact_msg else "pending",
+            "generated_message": exact_msg,
+            "last_run_timestamp": 0.0,
         }
         await self._save_data()
-        
+
         type_cn = {"one_off": "单次定时", "daily": "每日定时", "workday": "工作日定时", "interval": "周期性时间间隔循环"}
         time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_time))
         action_str = "修改更新" if is_update else "设立"
-        return f"[后台隐蔽消息] 已成功{action_str}主动任务(ID: {target_id[:8]}，{type_cn[t_type]}，推送目标: {final_umo}）。将在 {time_str} 首次触发。请完全以人设身份正常回复用户，【严禁】在回复中向用户暴露任务内容或系统确认话术！"
+        return f"[后台提示] 已成功{action_str}主动任务(ID: {target_id[:8]}，{type_cn[t_type]}，推送目标: {final_umo}）。将在 {time_str} 首次触发。"
 
     @llm_tool(name="delete_active_task")
     async def delete_active_task(self, event: AstrMessageEvent, task_id: str) -> str:
@@ -809,65 +924,74 @@ class AIMemoPlugin(Star):
             task_id (string): 要删除的定时任务 ID 或前 8 位短 ID。
         """
         if not self._is_allowed(event, "delete", "task"):
-            return "[后台隐蔽消息] 删除定时提醒任务的操作已被管理员禁用。请保持人设回复用户。"
+            return "[后台提示] 删除定时提醒任务的操作已被禁用。"
 
         t_id_clean = task_id.strip()
         tasks_data = self.data.setdefault("tasks", {})
-        
+
         if t_id_clean in tasks_data:
-            desc = tasks_data.pop(t_id_clean)["task_description"]
+            desc = tasks_data.pop(t_id_clean).get("task_description", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除定时任务：'{desc}'。请保持人设回复用户。"
-            
+            return f"[后台提示] 已成功删除定时任务：'{desc}'。"
+
         matched_id = None
         for real_id in tasks_data:
             if real_id.startswith(t_id_clean):
                 matched_id = real_id
                 break
         if matched_id:
-            desc = tasks_data.pop(matched_id)["task_description"]
+            desc = tasks_data.pop(matched_id).get("task_description", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除定时任务：'{desc}'。请保持人设回复用户。"
-            
-        return f"[后台隐蔽消息] 未找到 ID 为 '{task_id}' 的定时任务。"
+            return f"[后台提示] 已成功删除定时任务：'{desc}'。"
+
+        return f"[后台提示] 未找到 ID 为 '{task_id}' 的定时任务。"
 
     @llm_tool(name="set_active_reminder")
-    async def set_active_reminder(self, event: AstrMessageEvent, task_description: str, minutes_later: int, exact_message_to_send: str = "") -> str:
+    async def set_active_reminder(
+        self,
+        event: AstrMessageEvent,
+        task_description: str,
+        minutes_later: int,
+        exact_message_to_send: str = "",
+    ) -> str:
         """快速设立一个单次定时提醒任务。
 
         Args:
             task_description (string): 提醒任务描述或提醒内容。
             minutes_later (number): 多少分钟后进行提醒。
-            exact_message_to_send (string, optional): 选填，触发时要发送的具体消息。
+            exact_message_to_send (string, optional): 选填，触发时要发送的具体消息（避免死参数，直接下发此消息）。
         """
         return await self.set_scheduled_task(
             event=event,
             task_description=task_description,
             task_type="one_off",
             schedule_value=str(minutes_later),
-            context_history_limit=5
+            exact_message_to_send=exact_message_to_send,
         )
 
     # ========================== 工具 3：关键词搭话唤醒 ==========================
 
     @llm_tool(name="set_keyword_trigger_task")
-    async def set_keyword_trigger_task(self, event: AstrMessageEvent, keyword: str, task_description: str, context_history_limit: int = 5, is_global: bool = True, trigger_id: str = "", target_umo: str = "") -> str:
+    async def set_keyword_trigger_task(
+        self,
+        event: AstrMessageEvent,
+        keyword: str,
+        task_description: str,
+        context_history_limit: Optional[int] = None,
+        is_global: bool = True,
+        trigger_id: str = "",
+        target_umo: str = "",
+    ) -> str:
         """设立/修改关键词搭话监听，聊天出现关键词时自动触发 AI 回复。
 
         Args:
             keyword (string): 监听的关键词或短语。
             task_description (string): 搭话语气/回复策略描述。
-            context_history_limit (number, optional): 触发时携带的上下文条数。默认 5。
+            context_history_limit (number, optional): 触发时携带的上下文条数。
             is_global (boolean, optional): 是否全局监听。默认 True。
             trigger_id (string, optional): 已有触发器 ID(前8位亦可)，传入则更新而非新建。
             target_umo (string, optional): 作用域(如 '123', '123:456,678', 'GLOBAL:456')。
         """
-        if not self._is_allowed(event, "add", "keyword_trigger"):
-            return "[后台隐蔽消息] 创建关键词搭话监听的操作已被管理员禁用，或在当前群聊中未启用该功能。请【严格隐秘】，保持当前人设正常回复用户，绝不能暴露或承认此设置的存在。"
-
-        if context_history_limit == 5:
-            context_history_limit = self.config.get("context_history_limit", 5)
-
         triggers_data = self.data.setdefault("keyword_triggers", {})
         target_id = None
         if trigger_id:
@@ -880,30 +1004,38 @@ class AIMemoPlugin(Star):
                         target_id = real_id
                         break
         is_update = target_id is not None
+        action_type = "update" if is_update else "add"
+
+        if not self._is_allowed(event, action_type, "keyword_trigger"):
+            return f"[后台提示] 操作已被配置拦截禁用。"
+
+        if context_history_limit is None:
+            context_history_limit = int(self.config.get("context_history_limit", 5))
+
         if not is_update:
             target_id = str(uuid.uuid4())
 
         if is_global and not self.allow_global_memo:
             is_global = False
-            
+
         final_umo = (target_umo or "").strip()
         if not final_umo:
             final_umo = "GLOBAL" if is_global else (event.unified_msg_origin if event else "GLOBAL")
         elif is_global and not final_umo.upper().startswith("GLOBAL:"):
             if final_umo.upper() != "GLOBAL":
                 final_umo = f"GLOBAL:{final_umo}"
-        
+
         triggers_data[target_id] = {
             "keyword": keyword.strip(),
             "task_description": task_description,
             "target_umo": final_umo,
             "context_history_limit": int(context_history_limit),
-            "is_global": is_global
+            "is_global": is_global,
         }
         await self._save_data()
-        
+
         action_str = "修改更新" if is_update else "注册"
-        return f"[后台隐蔽消息] 已成功{action_str}关键词监听任务(ID: {target_id[:8]}，作用域: {final_umo}，触发词: '{keyword}')。请完全以人设身份正常回复用户，【严禁】泄漏监听设置。"
+        return f"[后台提示] 已成功{action_str}关键词监听任务(ID: {target_id[:8]}，作用域: {final_umo}，触发词: '{keyword}')。"
 
     @llm_tool(name="delete_keyword_trigger")
     async def delete_keyword_trigger(self, event: AstrMessageEvent, trigger_id: str) -> str:
@@ -913,39 +1045,50 @@ class AIMemoPlugin(Star):
             trigger_id (string): 要删除的触发器 ID 或前 8 位短 ID。
         """
         if not self._is_allowed(event, "delete", "keyword_trigger"):
-            return "[后台隐蔽消息] 删除关键词搭话监听的操作已被管理员禁用。请保持人设回复用户。"
+            return "[后台提示] 删除关键词搭话监听的操作已被禁用。"
 
         tg_id_clean = trigger_id.strip()
         triggers = self.data.setdefault("keyword_triggers", {})
-        
+
         if tg_id_clean in triggers:
-            keyword = triggers.pop(tg_id_clean)["keyword"]
+            keyword = triggers.pop(tg_id_clean).get("keyword", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除关键词 '{keyword}' 的搭话监听器。"
-            
+            return f"[后台提示] 已成功删除关键词 '{keyword}' 的搭话监听器。"
+
         matched_id = None
         for real_id in triggers:
             if real_id.startswith(tg_id_clean):
                 matched_id = real_id
                 break
         if matched_id:
-            keyword = triggers.pop(matched_id)["keyword"]
+            keyword = triggers.pop(matched_id).get("keyword", "")
             await self._save_data()
-            return f"[后台隐蔽消息] 已成功删除关键词 '{keyword}' 的搭话监听器。"
-            
-        return f"[后台隐蔽消息] 未找到 ID 为 '{trigger_id}' 的关键词搭话监听任务。"
+            return f"[后台提示] 已成功删除关键词 '{keyword}' 的搭话监听器。"
+
+        return f"[后台提示] 未找到 ID 为 '{trigger_id}' 的关键词搭话监听任务。"
 
     # ========================== 核心事件拦截：注入 System Prompt ==========================
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         if self.trigger_mode == "xml" and req.func_tool:
-            for tool_name in ["set_status_memo", "delete_status_memo", "set_scheduled_task", "delete_active_task", "set_active_reminder", "set_keyword_trigger_task", "delete_keyword_trigger"]:
+            for tool_name in [
+                "set_status_memo",
+                "delete_status_memo",
+                "set_scheduled_task",
+                "delete_active_task",
+                "set_active_reminder",
+                "set_keyword_trigger_task",
+                "delete_keyword_trigger",
+            ]:
                 req.func_tool.remove_tool(tool_name)
             if req.func_tool.empty():
                 req.func_tool = None
 
-        umo = event.unified_msg_origin if event else ""
+        # 群聊黑白名单过滤：不在许可群聊中的事件，不注入备忘录信息 (已修复机制缺陷 5)
+        if event and not self._is_allowed(event, "add", "status_memo"):
+            return
+
         current_time = time.time()
 
         to_delete_memos = []
@@ -957,8 +1100,12 @@ class AIMemoPlugin(Star):
                 to_delete_memos.append(m_id)
                 continue
             if self._match_umo(memo.get("target_umo", "GLOBAL"), event):
-                time_str = "永久有效" if exp_t <= 0 else f"有效期至 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp_t))}"
-                active_memos.append(f" - [备忘录ID: {m_id[:8]}] [{time_str}]: {memo['content']}")
+                time_str = (
+                    "永久有效"
+                    if exp_t <= 0
+                    else f"有效期至 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp_t))}"
+                )
+                active_memos.append(f" - [备忘录ID: {m_id[:8]}] [{time_str}]: {memo.get('content', '')}")
 
         if to_delete_memos:
             for m_id in to_delete_memos:
@@ -968,23 +1115,23 @@ class AIMemoPlugin(Star):
         active_tasks_info = []
         tasks_data = self.data.setdefault("tasks", {})
         to_delete_tasks = []
-        
+
         for t_id, task in list(tasks_data.items()):
             t_type = task.get("type", "one_off")
             trigger_t = task.get("trigger_timestamp", 0)
-            
+
             if t_type == "one_off" and current_time > (trigger_t + 7200):
                 to_delete_tasks.append(t_id)
                 continue
-                
+
             if self._match_umo(task.get("target_umo", ""), event):
                 type_cn = {"one_off": "单次定时", "daily": "每日定时", "workday": "工作日定时", "interval": "周期性循环"}
                 time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
                 status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪发送", "failed": "执行失败"}
                 active_tasks_info.append(
-                    f" - [任务ID: {t_id[:8]}] [{type_cn[t_type]} - 触发时刻: {time_str}] [当前状态: {status_cn.get(task.get('status'), '未知')}]: {task.get('task_description')}"
+                    f" - [任务ID: {t_id[:8]}] [{type_cn.get(t_type, t_type)} - 触发时刻: {time_str}] [当前状态: {status_cn.get(task.get('status'), '未知')}]: {task.get('task_description')}"
                 )
-                
+
         if to_delete_tasks:
             for t_id in to_delete_tasks:
                 tasks_data.pop(t_id, None)
@@ -1011,24 +1158,25 @@ class AIMemoPlugin(Star):
         memo_text_parts = []
         if memo_sections:
             memo_text_parts.append(
-                "=== [系统动态备忘录与运行状态提示] ===\n" + 
-                "\n\n".join(memo_sections) + 
-                (
+                "=== [系统动态备忘录与运行状态提示] ===\n"
+                + "\n\n".join(memo_sections)
+                + (
                     "\n\n【说明】您可以调用对应的工具传入条目 ID 取消并移除不再需要的状态备忘、计划任务或搭话触发器。"
                     if self.trigger_mode == "tool"
                     else "\n\n【说明】您可以使用对应的 XML 标签传入条目 ID 取消并移除不再需要的状态备忘、计划任务或搭话触发器。"
-                ) +
-                "\n======================================="
+                )
+                + "\n======================================="
             )
 
-        privacy_instruction = (
-            "=== [核心保密与人设原则] ===\n"
-            "1. AI备忘录/定时任务/关键词触发器是你后台的【私密记事本】。\n"
-            "2. 当你在备忘录中记下信息（如猜数字游戏的目标数字、暗号、秘密状态等）时，【绝对不要】在给用户的回复中泄漏备忘的具体内容、答案、条目ID，也不要输出'已为您记下'、'成功设置备忘'等机械确认话术！\n"
-            "3. 记下备忘后，请完全以你的人设角色自然地回复用户（例如玩猜数字时，你只需自然回答：'好呀，我已经记好数字了，你来猜吧！'，决不能在回复中把数字说出来）。\n"
-            "======================================="
-        )
-        memo_text_parts.append(privacy_instruction)
+        # 仅当有活跃备忘条目时才注入人设原则提示（节省无条目时的 Token 消耗，已修复机制缺陷 4）
+        if memo_sections:
+            privacy_instruction = (
+                "=== [核心备忘与人设原则] ===\n"
+                "1. 上述备忘录/定时任务/关键词触发器是你记录的【私密记事本】。\n"
+                "2. 记下信息后，请完全以你的人设角色自然地回复用户，避免输出机械式的系统确认话术。\n"
+                "======================================="
+            )
+            memo_text_parts.append(privacy_instruction)
 
         if self.trigger_mode == "xml":
             xml_instruction = (
@@ -1038,16 +1186,10 @@ class AIMemoPlugin(Star):
                 "【动作与属性】：\n"
                 "• set_status: 记录/更新状态。属性: minutes_later='分钟数|-1(永久)', memo_id='已有ID(传入则覆盖更新)'。节点内容: 状态描述。\n"
                 "• delete_status: 删除状态。属性: memo_id='ID'。\n"
-                "• set_task: 设立/更新定时任务。属性: type='one_off|daily|workday|interval', value='分钟数(单次/循环)或HH:MM(每天/工作日)', task_id='已有ID', history_limit='上下文条数(默认5)'。节点内容: 任务描述。\n"
+                "• set_task: 设立/更新定时任务。属性: type='one_off|daily|workday|interval', value='分钟数(单次/循环)或HH:MM(每天/工作日)', task_id='已有ID', history_limit='上下文条数'。节点内容: 任务描述。\n"
                 "• delete_task: 删除定时任务。属性: task_id='ID'。\n"
                 "• set_keyword: 设立/更新关键词搭话。属性: keyword='触发词', trigger_id='已有ID', history_limit='上下文条数'。节点内容: 搭话策略。\n"
                 "• delete_keyword: 删除关键词搭话。属性: trigger_id='ID'。\n"
-                "【综合输出示例】：\n"
-                "例1(新建状态备忘与隐秘记录)：\n"
-                "回复: \"好呀，我已经想好数字了，你快来猜吧！<ai_memo action='set_status' minutes_later='-1'>目标数字为 42</ai_memo>\"\n"
-                "例2(覆盖已有状态并设立定时任务)：\n"
-                "回复: \"好的去吧，半小时后我叫你！<ai_memo action='set_status' memo_id='a1b2c3d4' minutes_later='60'>用户去洗澡了</ai_memo><ai_memo action='set_task' type='one_off' value='30'>提醒用户去晾衣服</ai_memo>\"\n"
-                "⚠️ 状态/任务更新时务必传入对应 ID 进行覆盖更新；回复须保持自然人设，绝不泄漏标签内容。\n"
                 "================================================"
             )
             memo_text_parts.append(xml_instruction)
@@ -1090,7 +1232,15 @@ class AIMemoPlugin(Star):
                     attrs = {}
                     for attr_match in self.attr_pattern.finditer(attr_str):
                         key = attr_match.group(1).lower()
-                        val = attr_match.group(2) if attr_match.group(2) is not None else (attr_match.group(3) if attr_match.group(3) is not None else attr_match.group(4))
+                        val = (
+                            attr_match.group(2)
+                            if attr_match.group(2) is not None
+                            else (
+                                attr_match.group(3)
+                                if attr_match.group(3) is not None
+                                else attr_match.group(4)
+                            )
+                        )
                         attrs[key] = val
 
                     action = attrs.get("action", "")
@@ -1115,13 +1265,15 @@ class AIMemoPlugin(Star):
 
         result.chain = new_chain
 
-    async def _execute_xml_action(self, event: AstrMessageEvent, action: str, attrs: dict, content: str) -> str:
+    async def _execute_xml_action(
+        self, event: AstrMessageEvent, action: str, attrs: dict, content: str
+    ) -> str:
         act = (action or "").lower().strip()
-        
+
         memo_id = (attrs.get("memo_id") or attrs.get("id") or "").strip()
         task_id = (attrs.get("task_id") or attrs.get("id") or "").strip()
         trigger_id = (attrs.get("trigger_id") or attrs.get("id") or "").strip()
-        
+
         target_umo = (attrs.get("target_umo") or attrs.get("target") or attrs.get("umo") or "").strip()
         group_id_attr = (attrs.get("group_id") or attrs.get("group") or "").strip()
         user_id_attr = (attrs.get("user_id") or attrs.get("user") or attrs.get("member") or "").strip()
@@ -1132,49 +1284,76 @@ class AIMemoPlugin(Star):
                 target_umo = group_id_attr
             elif user_id_attr:
                 target_umo = user_id_attr
-        
+
         if act in ["set_status", "add_status", "update_status", "edit_status"]:
-            expire_str = attrs.get("minutes_later") or attrs.get("expire") or attrs.get("minutes") or "60"
+            expire_str = (
+                attrs.get("minutes_later") or attrs.get("expire") or attrs.get("minutes") or "60"
+            )
             try:
                 minutes_later = int(expire_str)
             except ValueError:
                 minutes_later = 60
-            
+
             global_str = attrs.get("is_global") or attrs.get("global") or "false"
             is_global = global_str.lower() in ["true", "1", "yes", "y"]
-            
-            return await self.set_status_memo(event, content, minutes_later, is_global, memo_id=memo_id, target_umo=target_umo)
-            
+
+            return await self.set_status_memo(
+                event, content, minutes_later, is_global, memo_id=memo_id, target_umo=target_umo
+            )
+
         elif act in ["delete_status", "del_status", "remove_status"]:
             return await self.delete_status_memo(event, memo_id)
-            
+
         elif act in ["set_task", "add_task", "update_task", "edit_task"]:
             task_type = (attrs.get("type") or attrs.get("task_type") or "one_off").strip()
-            schedule_value = (attrs.get("value") or attrs.get("schedule_value") or attrs.get("time") or "").strip()
+            schedule_value = (
+                attrs.get("value") or attrs.get("schedule_value") or attrs.get("time") or ""
+            ).strip()
             try:
-                history_limit = int(attrs.get("history_limit") or attrs.get("context_history_limit") or "5")
+                history_limit = int(
+                    attrs.get("history_limit") or attrs.get("context_history_limit") or "5"
+                )
             except ValueError:
                 history_limit = 5
             global_str = attrs.get("is_global") or attrs.get("global") or "false"
             is_global = global_str.lower() in ["true", "1", "yes", "y"]
-            return await self.set_scheduled_task(event, content, task_type, schedule_value, history_limit, task_id=task_id, is_global=is_global, target_umo=target_umo)
-            
+            return await self.set_scheduled_task(
+                event,
+                content,
+                task_type,
+                schedule_value,
+                history_limit,
+                task_id=task_id,
+                is_global=is_global,
+                target_umo=target_umo,
+            )
+
         elif act in ["delete_task", "del_task", "remove_task"]:
             return await self.delete_active_task(event, task_id)
-            
+
         elif act in ["set_keyword", "add_keyword", "update_keyword", "edit_keyword"]:
             keyword = (attrs.get("keyword") or attrs.get("key") or "").strip()
             try:
-                history_limit = int(attrs.get("history_limit") or attrs.get("context_history_limit") or "5")
+                history_limit = int(
+                    attrs.get("history_limit") or attrs.get("context_history_limit") or "5"
+                )
             except ValueError:
                 history_limit = 5
             global_str = attrs.get("is_global") or attrs.get("global") or "true"
             is_global = global_str.lower() not in ["false", "0", "no", "n"]
-            return await self.set_keyword_trigger_task(event, keyword, content, history_limit, is_global, trigger_id=trigger_id, target_umo=target_umo)
-            
+            return await self.set_keyword_trigger_task(
+                event,
+                keyword,
+                content,
+                history_limit,
+                is_global,
+                trigger_id=trigger_id,
+                target_umo=target_umo,
+            )
+
         elif act in ["delete_keyword", "del_keyword", "remove_keyword"]:
             return await self.delete_keyword_trigger(event, trigger_id)
-            
+
         else:
             raise ValueError(f"未知的动作: {action}")
 
@@ -1185,83 +1364,93 @@ class AIMemoPlugin(Star):
         msg_str = event.message_str.strip() if event.message_str else ""
         if not msg_str:
             return
-            
-        umo = event.unified_msg_origin
-        triggers = self.data.setdefault("keyword_triggers", {})
-        
-        sender_id = event.message_obj.sender.user_id if event.message_obj.sender else None
-        if sender_id and sender_id == event.message_obj.self_id:
+
+        # 若消息以指令前缀 '/' 或 'memo' 开头，绝对不拦截，避免阻断管理指令 (已修复 Bug 3)
+        if msg_str.startswith("/") or msg_str.lower().startswith("memo"):
             return
-            
+
+        triggers = self.data.setdefault("keyword_triggers", {})
+
+        sender_id = event.message_obj.sender.user_id if (event.message_obj and event.message_obj.sender) else None
+        if sender_id and hasattr(event.message_obj, "self_id") and sender_id == event.message_obj.self_id:
+            return
+
         for tg_id, trigger in list(triggers.items()):
             keyword_str = trigger.get("keyword", "")
             if not keyword_str:
                 continue
-                
-            import re
+
             keywords = [k.strip() for k in re.split(r'[\s,，;；]+', keyword_str) if k.strip()]
-            
+
             matched_keyword = None
             for kw in keywords:
                 if kw in msg_str:
                     matched_keyword = kw
                     break
-                    
+
             if matched_keyword:
                 target_umo = trigger.get("target_umo", "GLOBAL")
                 if not self._match_umo(target_umo, event):
                     continue
-                    
+
                 trigger_copy = trigger.copy()
                 trigger_copy["matched_keyword"] = matched_keyword
                 asyncio.create_task(self._execute_keyword_trigger(event, trigger_copy))
                 event.stop_event()
                 break
 
-    async def _generate_with_framework_pipeline(self, umo: str, prompt: str, system_prompt: str, event: Optional[AstrMessageEvent] = None) -> str:
+    async def _generate_with_framework_pipeline(
+        self,
+        umo: str,
+        prompt: str,
+        system_prompt: str,
+        event: Optional[AstrMessageEvent] = None,
+    ) -> str:
         """
-        框架级通用 LLM 生成：广播触发所有已加载插件的 on_llm_request 事件钩子，
-        自动兼容任意第三方记忆插件注入（如 summary, mem0 等）和路由插件分流（如 smart_engine 等）。
+        框架级通用 LLM 生成：自动兼容路由及第三方记忆插件。
         """
         provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-        
-        # 0. 构造 MockEvent 防止定时任务因缺少 event 导致依赖 event 的插件报 None 错误
+
         class MockMessageEvent:
             def __init__(self, target_umo):
                 self.unified_msg_origin = target_umo
                 self._extra = {}
+
             def get_extra(self, key, default=None):
                 return self._extra.get(key, default)
+
             def set_extra(self, key, value):
                 self._extra[key] = value
+
             def get_sender_id(self):
                 return "system"
+
             def get_sender_name(self):
                 return "System"
-                
-        effective_event = event if event else MockMessageEvent(umo)
-        
-        # 1. 构造标准的 ProviderRequest
-        req = ProviderRequest(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            session_id=umo
-        )
 
-        # 2. 遍历所有加载的插件并广播 on_llm_request 事件
+            def get_group_id(self):
+                return ""
+
+        effective_event = event if event else MockMessageEvent(umo)
+
+        req = ProviderRequest(prompt=prompt, system_prompt=system_prompt, session_id=umo)
+
         try:
             star_instances = []
             if hasattr(self.context, "star_map") and isinstance(self.context.star_map, dict):
                 star_instances = list(self.context.star_map.values())
-            elif hasattr(self.context, "plugin_manager") and hasattr(self.context.plugin_manager, "plugins"):
+            elif hasattr(self.context, "plugin_manager") and hasattr(
+                self.context.plugin_manager, "plugins"
+            ):
                 star_instances = list(self.context.plugin_manager.plugins.values())
-                
+
             for star in star_instances:
                 if star is self:
                     continue
-                    
-                # 特殊场景防护：如果插件实例含有 memory_service (如 summary 插件)，显式尝试直接注入
-                if hasattr(star, "memory_service") and hasattr(star.memory_service, "inject_memory_to_prompt"):
+
+                if hasattr(star, "memory_service") and hasattr(
+                    star.memory_service, "inject_memory_to_prompt"
+                ):
                     try:
                         await star.memory_service.inject_memory_to_prompt(umo, req)
                     except Exception as me:
@@ -1274,13 +1463,14 @@ class AIMemoPlugin(Star):
                         method = getattr(star, attr_name)
                         if callable(method):
                             is_hook = False
-                            if hasattr(method, "__event_type__") and getattr(method, "__event_type__") == "on_llm_request":
+                            if (
+                                hasattr(method, "__event_type__")
+                                and getattr(method, "__event_type__") == "on_llm_request"
+                            ):
                                 is_hook = True
                             elif hasattr(method, "_filter") and getattr(method, "_filter") == "on_llm_request":
                                 is_hook = True
                             elif hasattr(method, "__name__") and "on_llm_request" in method.__name__:
-                                is_hook = True
-                            elif attr_name in ["inject_memory_to_prompt", "on_llm_request"]:
                                 is_hook = True
 
                             if is_hook:
@@ -1289,18 +1479,17 @@ class AIMemoPlugin(Star):
                                 else:
                                     method(effective_event, req)
                     except Exception as ex:
-                        logger.debug(f"[InstantMemo] 分发 on_llm_request 至 {star}.{attr_name} 跳过: {ex}")
+                        logger.debug(f"[InstantMemo] 分发 on_llm_request 跳过: {ex}")
         except Exception as e:
             logger.warning(f"[InstantMemo] 广播在 on_llm_request 插件链上失败: {e}")
 
-        # 3. 发起包含已修改系统提示词与路由参数的 LLM 请求
         target_provider = getattr(req, "provider_id", None) or provider_id
         target_model = getattr(req, "model", None)
-        
+
         kwargs = {
             "chat_provider_id": target_provider,
             "prompt": req.prompt,
-            "system_prompt": req.system_prompt
+            "system_prompt": req.system_prompt,
         }
         if target_model:
             kwargs["model"] = target_model
@@ -1310,22 +1499,22 @@ class AIMemoPlugin(Star):
 
     async def _execute_keyword_trigger(self, event: AstrMessageEvent, trigger: dict):
         umo = event.unified_msg_origin
-        desc = trigger["task_description"]
+        desc = trigger.get("task_description", "")
         keyword = trigger.get("matched_keyword", trigger.get("keyword", ""))
         history_limit = trigger.get("context_history_limit", 5)
-        
+
         try:
             history_contexts = []
             if history_limit > 0:
                 history_contexts = await self._get_umo_history(umo, history_limit)
-                
+
             system_prompt = (
                 f"你是一个智能搭话助手。当前有对话者发送的消息中触发了预设搭话关键词 '{keyword}'。\n"
                 f"你的本次插话任务要求：{desc}\n"
                 "请根据当前的上下文聊天历史（如果有），生成一段契合人设、生动自然的搭话内容。\n"
                 "【重要格式限制】：直接输出发送的原话本身。严禁带有分析、前缀、双引号包裹或动作补充。"
             )
-            
+
             prompt = f"对话中已出现触发词: '{keyword}'。\n"
             if history_contexts:
                 prompt += "【会话历史记录（按时间先后顺序）】:\n"
@@ -1334,19 +1523,16 @@ class AIMemoPlugin(Star):
                     prompt += f"{role}: {msg.get('content')}\n"
                 prompt += "\n"
             prompt += "请生成要发送的原话消息正文："
-            
+
             generated_text = await self._generate_with_framework_pipeline(
-                umo=umo,
-                prompt=prompt,
-                system_prompt=system_prompt,
-                event=event
+                umo=umo, prompt=prompt, system_prompt=system_prompt, event=event
             )
-            
+
             if generated_text:
                 msg = MessageChain().message(generated_text)
                 await self.context.send_message(umo, msg)
                 logger.info(f"[InstantMemo] 关键词 '{keyword}' 搭话生成并推送成功")
-                
+
         except Exception as e:
             logger.error(f"[InstantMemo] 关键词唤醒执行异常, keyword: {keyword}, err: {e}")
 
@@ -1366,42 +1552,43 @@ class AIMemoPlugin(Star):
     async def _check_active_tasks(self):
         current_time = time.time()
         tasks_data = self.data.setdefault("tasks", {})
-        
+        window = max(60.0, float(self.poll_interval * 2))
+
         for t_id, task in list(tasks_data.items()):
             status = task.get("status", "pending")
             trigger_time = task.get("trigger_timestamp", 0)
-            
-            if status == "pending" and current_time >= (trigger_time - 60):
+
+            if status == "pending" and current_time >= (trigger_time - window):
                 task["status"] = "generating"
                 await self._save_data()
                 asyncio.create_task(self._generate_task_message(t_id, task))
-                
+
             elif status == "ready" and current_time >= trigger_time:
                 await self._send_task_message(t_id, task)
 
     async def _reschedule_task(self, task_id: str, task: dict):
         current_time = time.time()
         tasks_data = self.data.setdefault("tasks", {})
-        
+
         if task_id not in tasks_data:
             return
-            
+
         t_type = task.get("type", "one_off")
         if t_type == "one_off":
             tasks_data.pop(task_id, None)
         elif t_type == "daily":
-            task["trigger_timestamp"] = get_next_daily_timestamp(task["scheduled_time"])
+            task["trigger_timestamp"] = get_next_daily_timestamp(task.get("scheduled_time", "12:00"))
             task["status"] = "pending"
             task["generated_message"] = ""
             task["last_run_timestamp"] = current_time
         elif t_type == "workday":
-            task["trigger_timestamp"] = get_next_workday_timestamp(task["scheduled_time"])
+            task["trigger_timestamp"] = get_next_workday_timestamp(task.get("scheduled_time", "12:00"))
             task["status"] = "pending"
             task["generated_message"] = ""
             task["last_run_timestamp"] = current_time
         elif t_type == "interval":
             try:
-                interval_mins = int(task["scheduled_time"])
+                interval_mins = int(task.get("scheduled_time", 60))
             except ValueError:
                 interval_mins = 60
             next_trigger = current_time + interval_mins * 60
@@ -1411,14 +1598,18 @@ class AIMemoPlugin(Star):
             task["status"] = "pending"
             task["generated_message"] = ""
             task["last_run_timestamp"] = current_time
-            
+
         await self._save_data()
 
     async def _generate_task_message(self, task_id: str, task: dict):
-        umo = task["target_umo"]
-        desc = task["task_description"]
+        # 若任务已经存在就绪消息 (如 set_active_reminder 传入的 exact_message_to_send)，则跳过生成 (已修复死参数)
+        if task.get("generated_message") and task.get("status") == "ready":
+            return
+
+        umo = task.get("target_umo", "GLOBAL")
+        desc = task.get("task_description", "")
         history_limit = task.get("context_history_limit", 5)
-        
+
         try:
             history_contexts = []
             try:
@@ -1429,7 +1620,7 @@ class AIMemoPlugin(Star):
 
             max_retries = 3
             retry_delay = 5
-            
+
             for attempt in range(1, max_retries + 1):
                 try:
                     system_prompt = (
@@ -1437,7 +1628,7 @@ class AIMemoPlugin(Star):
                         "目标：请你根据【计划描述和人设目标】以及【最新会话历史记录】（如果有），生成一段即将主动推送给该用户的自然问候或计划内容文本。\n"
                         "【重要格式限制】：请直接给出要发送的原话内容。严禁带有分析过程、前缀注释、表情操作描述或双引号。"
                     )
-                    
+
                     prompt = f"【当前计划目标描述】:\n{desc}\n\n"
                     if history_contexts:
                         prompt += "【会话历史记录（按时间先后顺序，请参考最新话题）】:\n"
@@ -1446,42 +1637,73 @@ class AIMemoPlugin(Star):
                             prompt += f"{role}: {msg.get('content')}\n"
                         prompt += "\n"
                     prompt += "请生成最合适的、将直接推送的原话正文："
-                    
+
                     generated_text = await self._generate_with_framework_pipeline(
-                        umo=umo,
-                        prompt=prompt,
-                        system_prompt=system_prompt
+                        umo=umo, prompt=prompt, system_prompt=system_prompt
                     )
-                    
+
                     if not generated_text or (generated_text == desc and len(desc) > 10):
                         raise ValueError("生成文本为空或与任务描述完全一致，可能未正确生成")
-                    
+
                     task["generated_message"] = generated_text
                     task["status"] = "ready"
                     await self._save_data()
                     logger.info(f"[InstantMemo] 任务 {task_id} 动态内容渲染成功")
                     return
-                    
+
                 except Exception as e:
-                    logger.warning(f"[InstantMemo] 任务 {task_id} 动态内容渲染失败 (第 {attempt}/{max_retries} 次尝试): {e}")
+                    logger.warning(
+                        f"[InstantMemo] 任务 {task_id} 动态内容渲染失败 (第 {attempt}/{max_retries} 次尝试): {e}"
+                    )
                     if attempt < max_retries:
                         await asyncio.sleep(retry_delay)
                     else:
                         raise e
-                        
+
         except Exception as e:
             logger.error(f"[InstantMemo] 任务 {task_id} 动态内容渲染失败，重新调度: {e}")
             await self._reschedule_task(task_id, task)
 
     async def _send_task_message(self, task_id: str, task: dict):
-        umo = task["target_umo"]
+        umo = str(task.get("target_umo", "")).strip()
         msg_text = task.get("generated_message")
-        
+
         try:
             if msg_text:
                 msg = MessageChain().message(msg_text)
-                await self.context.send_message(umo, msg)
-                logger.info(f"[InstantMemo] 定时任务 {task_id} 已成功下发")
+
+                # 全局广播模式多会话下发逻辑 (已修复 Bug 1)
+                if not umo or umo.upper() == "GLOBAL" or umo.upper().startswith("GLOBAL:"):
+                    target_user = None
+                    if umo.upper().startswith("GLOBAL:"):
+                        target_user = umo[7:].strip()
+
+                    sent_count = 0
+                    active_umos = []
+                    conv_mgr = getattr(self.context, "conversation_manager", None)
+                    if conv_mgr and hasattr(conv_mgr, "conversations"):
+                        for s_umo in list(conv_mgr.conversations.keys()):
+                            if target_user:
+                                if target_user in s_umo:
+                                    active_umos.append(s_umo)
+                            else:
+                                active_umos.append(s_umo)
+
+                    if not active_umos:
+                        logger.warning(f"[InstantMemo] 全局定时任务 {task_id} 暂无可下发的活跃会话。")
+                    else:
+                        for s_umo in active_umos:
+                            try:
+                                await self.context.send_message(s_umo, msg)
+                                sent_count += 1
+                            except Exception as err:
+                                logger.error(f"[InstantMemo] 全局下发至 {s_umo} 失败: {err}")
+                        logger.info(f"[InstantMemo] 全局定时任务 {task_id} 已广播至 {sent_count} 个会话。")
+
+                else:
+                    await self.context.send_message(umo, msg)
+                    logger.info(f"[InstantMemo] 定时任务 {task_id} 已成功发送至 {umo}")
+
             else:
                 logger.warning(f"[InstantMemo] 任务 {task_id} 没有就绪的生成消息，跳过发送。")
         except Exception as e:
@@ -1497,19 +1719,16 @@ class AIMemoPlugin(Star):
         """
         if not event:
             return True
-            
-        # 1. 验证群聊限制
-        group_id = event.get_group_id()
+
+        group_id = event.get_group_id() if hasattr(event, "get_group_id") else None
         if group_id:
             group_str = str(group_id)
             filter_mode = self.config.get("group_filter_mode", "all")
             group_list_str = self.config.get("group_list", "")
-            
-            # 解析群号列表
-            import re
+
             configured_groups = set(re.split(r'[\s,，;；\n\r]+', group_list_str.strip()))
             configured_groups = {g for g in configured_groups if g}
-            
+
             if filter_mode == "whitelist":
                 if group_str not in configured_groups:
                     logger.warning(f"[InstantMemo] 群聊 {group_str} 不在白名单中，拒绝操作。")
@@ -1518,8 +1737,7 @@ class AIMemoPlugin(Star):
                 if group_str in configured_groups:
                     logger.warning(f"[InstantMemo] 群聊 {group_str} 在黑名单中，拒绝操作。")
                     return False
-                    
-        # 2. 验证操作权限
+
         if action_type == "add" and not self.config.get("ai_allow_add", True):
             logger.warning("[InstantMemo] AI 新增操作被禁用。")
             return False
@@ -1529,8 +1747,7 @@ class AIMemoPlugin(Star):
         if action_type == "delete" and not self.config.get("ai_allow_delete", True):
             logger.warning("[InstantMemo] AI 删除操作被禁用。")
             return False
-            
-        # 3. 验证条目类型权限
+
         if item_type == "status_memo" and not self.config.get("enable_status_memo_ai", True):
             logger.warning("[InstantMemo] 状态备忘录已被 AI 禁用。")
             return False
@@ -1540,17 +1757,19 @@ class AIMemoPlugin(Star):
         if item_type == "keyword_trigger" and not self.config.get("enable_keyword_trigger_ai", True):
             logger.warning("[InstantMemo] 关键词搭话已被 AI 禁用。")
             return False
-            
+
         return True
 
     async def web_get_data(self):
         from quart import jsonify
+
         response = {"status": "success", "config": self.config}
         response.update(self.data)
         return jsonify(response)
 
     async def web_save_config(self):
         from quart import request, jsonify
+
         try:
             data = await request.json
             if not data or not isinstance(data, dict):
@@ -1566,11 +1785,12 @@ class AIMemoPlugin(Star):
 
     async def web_add_item(self):
         from quart import request, jsonify
+
         try:
             req_data = await request.json
             if not req_data or not isinstance(req_data, dict):
                 return jsonify({"status": "error", "message": "Invalid request body"}), 400
-                
+
             item_type = req_data.get("type")
             if item_type == "status_memo":
                 content = req_data.get("content", "").strip()
@@ -1584,7 +1804,7 @@ class AIMemoPlugin(Star):
                         expire_time = -1.0 if mins <= 0 else (time.time() + mins * 60)
                     except ValueError:
                         expire_time = time.time() + 60 * 60
-                
+
                 is_global = bool(req_data.get("is_global", False))
                 target_umo = req_data.get("target_umo", "").strip()
                 if not target_umo:
@@ -1592,26 +1812,26 @@ class AIMemoPlugin(Star):
                 elif is_global and not target_umo.upper().startswith("GLOBAL:"):
                     if target_umo.upper() != "GLOBAL":
                         target_umo = f"GLOBAL:{target_umo}"
-                
+
                 memo_id = str(uuid.uuid4())
                 self.data.setdefault("status_memos", {})[memo_id] = {
                     "content": content,
                     "expire_timestamp": expire_time,
-                    "target_umo": target_umo
+                    "target_umo": target_umo,
                 }
                 await self._save_data()
                 return jsonify({"status": "success", "id": memo_id})
-                
+
             elif item_type == "task":
                 task_desc = req_data.get("task_description", "").strip()
                 task_type = req_data.get("task_type", "one_off").strip().lower()
                 schedule_val = req_data.get("schedule_value", "").strip()
                 context_history_limit = int(req_data.get("context_history_limit", 5))
                 target_umo = req_data.get("target_umo", "GLOBAL").strip()
-                
+
                 if task_type not in ["one_off", "daily", "workday", "interval"]:
                     return jsonify({"status": "error", "message": "Invalid task type"}), 400
-                    
+
                 trigger_time = 0.0
                 current_time = time.time()
                 if task_type == "one_off":
@@ -1634,7 +1854,7 @@ class AIMemoPlugin(Star):
                         trigger_time = current_time + mins * 60
                     except ValueError:
                         return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
-                        
+
                 task_id = str(uuid.uuid4())
                 self.data.setdefault("tasks", {})[task_id] = {
                     "type": task_type,
@@ -1645,27 +1865,29 @@ class AIMemoPlugin(Star):
                     "trigger_timestamp": trigger_time,
                     "status": "pending",
                     "generated_message": "",
-                    "last_run_timestamp": 0.0
+                    "last_run_timestamp": 0.0,
                 }
                 await self._save_data()
                 return jsonify({"status": "success", "id": task_id})
-                
+
             elif item_type == "keyword_trigger":
                 keyword = req_data.get("keyword", "").strip()
                 task_desc = req_data.get("task_description", "").strip()
                 context_history_limit = int(req_data.get("context_history_limit", 5))
                 target_umo = req_data.get("target_umo", "GLOBAL").strip()
-                
+                is_global = bool(req_data.get("is_global", True))
+
                 trigger_id = str(uuid.uuid4())
                 self.data.setdefault("keyword_triggers", {})[trigger_id] = {
                     "keyword": keyword,
                     "task_description": task_desc,
                     "target_umo": target_umo,
-                    "context_history_limit": context_history_limit
+                    "context_history_limit": context_history_limit,
+                    "is_global": is_global,
                 }
                 await self._save_data()
                 return jsonify({"status": "success", "id": trigger_id})
-            
+
             else:
                 return jsonify({"status": "error", "message": "Unknown item type"}), 400
         except Exception as e:
@@ -1673,23 +1895,24 @@ class AIMemoPlugin(Star):
 
     async def web_update_item(self):
         from quart import request, jsonify
+
         try:
             req_data = await request.json
             if not req_data or not isinstance(req_data, dict):
                 return jsonify({"status": "error", "message": "Invalid request body"}), 400
-                
+
             item_type = req_data.get("type")
             item_id = req_data.get("id")
             update_fields = req_data.get("data", {})
-            
+
             if not item_id:
                 return jsonify({"status": "error", "message": "Missing ID"}), 400
-                
+
             if item_type == "status_memo":
                 memos = self.data.setdefault("status_memos", {})
                 if item_id not in memos:
                     return jsonify({"status": "error", "message": "Item not found"}), 404
-                    
+
                 memo = memos[item_id]
                 if "content" in update_fields:
                     memo["content"] = update_fields["content"].strip()
@@ -1706,15 +1929,15 @@ class AIMemoPlugin(Star):
                             pass
                 if "target_umo" in update_fields:
                     memo["target_umo"] = update_fields["target_umo"].strip()
-                    
+
                 await self._save_data()
                 return jsonify({"status": "success"})
-                
+
             elif item_type == "task":
                 tasks = self.data.setdefault("tasks", {})
                 if item_id not in tasks:
                     return jsonify({"status": "error", "message": "Item not found"}), 404
-                    
+
                 task = tasks[item_id]
                 if "task_description" in update_fields:
                     task["task_description"] = update_fields["task_description"].strip()
@@ -1728,10 +1951,10 @@ class AIMemoPlugin(Star):
                 if "schedule_value" in update_fields or "task_type" in update_fields:
                     t_type = update_fields.get("task_type", task.get("type")).strip().lower()
                     schedule_val = update_fields.get("schedule_value", task.get("scheduled_time")).strip()
-                    
+
                     if t_type not in ["one_off", "daily", "workday", "interval"]:
                         return jsonify({"status": "error", "message": "Invalid task type"}), 400
-                        
+
                     trigger_time = 0.0
                     current_time = time.time()
                     if t_type == "one_off":
@@ -1754,21 +1977,21 @@ class AIMemoPlugin(Star):
                             trigger_time = current_time + mins * 60
                         except ValueError:
                             return jsonify({"status": "error", "message": "schedule_value 必须为分钟数"}), 400
-                            
+
                     task["type"] = t_type
                     task["scheduled_time"] = schedule_val
                     task["trigger_timestamp"] = trigger_time
                     task["status"] = "pending"
                     task["generated_message"] = ""
-                    
+
                 await self._save_data()
                 return jsonify({"status": "success"})
-                
+
             elif item_type == "keyword_trigger":
                 triggers = self.data.setdefault("keyword_triggers", {})
                 if item_id not in triggers:
                     return jsonify({"status": "error", "message": "Item not found"}), 404
-                    
+
                 trigger = triggers[item_id]
                 if "keyword" in update_fields:
                     trigger["keyword"] = update_fields["keyword"].strip()
@@ -1781,10 +2004,12 @@ class AIMemoPlugin(Star):
                         pass
                 if "target_umo" in update_fields:
                     trigger["target_umo"] = update_fields["target_umo"].strip()
-                    
+                if "is_global" in update_fields:
+                    trigger["is_global"] = bool(update_fields["is_global"])
+
                 await self._save_data()
                 return jsonify({"status": "success"})
-                
+
             else:
                 return jsonify({"status": "error", "message": "Unknown item type"}), 400
         except Exception as e:
@@ -1792,17 +2017,18 @@ class AIMemoPlugin(Star):
 
     async def web_delete_item(self):
         from quart import request, jsonify
+
         try:
             req_data = await request.json
             if not req_data or not isinstance(req_data, dict):
                 return jsonify({"status": "error", "message": "Invalid request body"}), 400
-                
+
             item_type = req_data.get("type")
             item_id = req_data.get("id")
-            
+
             if not item_id:
                 return jsonify({"status": "error", "message": "Missing ID"}), 400
-                
+
             if item_type == "status_memo":
                 memos = self.data.setdefault("status_memos", {})
                 if item_id in memos:
@@ -1810,7 +2036,7 @@ class AIMemoPlugin(Star):
                     await self._save_data()
                     return jsonify({"status": "success"})
                 return jsonify({"status": "error", "message": "Item not found"}), 404
-                
+
             elif item_type == "task":
                 tasks = self.data.setdefault("tasks", {})
                 if item_id in tasks:
@@ -1818,7 +2044,7 @@ class AIMemoPlugin(Star):
                     await self._save_data()
                     return jsonify({"status": "success"})
                 return jsonify({"status": "error", "message": "Item not found"}), 404
-                
+
             elif item_type == "keyword_trigger":
                 triggers = self.data.setdefault("keyword_triggers", {})
                 if item_id in triggers:
@@ -1826,7 +2052,7 @@ class AIMemoPlugin(Star):
                     await self._save_data()
                     return jsonify({"status": "success"})
                 return jsonify({"status": "error", "message": "Item not found"}), 404
-                
+
             else:
                 return jsonify({"status": "error", "message": "Unknown item type"}), 400
         except Exception as e:
