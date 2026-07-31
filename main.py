@@ -161,8 +161,52 @@ class AIMemoPlugin(Star):
             "删除指定备忘条目",
         )
 
+    def _is_group_allowed(self, group_id: Optional[object]) -> bool:
+        """纯粹判断群聊 ID 是否符合白名单/黑名单过滤规则（无侧边日志刷屏，专供各环节复用）"""
+        if not group_id:
+            return True
+        group_str = str(group_id).strip()
+        if not group_str:
+            return True
+
+        filter_mode = self.config.get("group_filter_mode", "all")
+        if filter_mode == "all":
+            return True
+
+        group_list_str = self.config.get("group_list", "")
+        configured_groups = set(re.split(r'[\s,，;；\n\r]+', group_list_str.strip()))
+        configured_groups = {g for g in configured_groups if g}
+
+        if filter_mode == "whitelist":
+            return group_str in configured_groups
+        elif filter_mode == "blacklist":
+            return group_str not in configured_groups
+
+        return True
+
+    def _resolve_target_umo(self, is_global: bool, target_umo: str, default_umo: str) -> str:
+        """统一收口 target_umo 解析与 allow_global_memo 限制（消除三个工具行为不一致问题）"""
+        t_clean = (target_umo or "").strip()
+
+        # 当管理者关闭全局备忘录开关 (allow_global_memo=False) 时：
+        # 无论是勾选了 is_global 还是显式传了 "GLOBAL" / "GLOBAL:123"，全盘自动退回/限制为当前会话 UMO
+        if not self.allow_global_memo:
+            if is_global or t_clean.upper().startswith("GLOBAL"):
+                return default_umo if default_umo else "DEFAULT"
+            return t_clean if t_clean else (default_umo if default_umo else "DEFAULT")
+
+        # 当允许全局备忘录时：
+        if not t_clean:
+            return "GLOBAL" if is_global else (default_umo if default_umo else "GLOBAL")
+
+        if is_global and not t_clean.upper().startswith("GLOBAL:"):
+            if t_clean.upper() != "GLOBAL":
+                return f"GLOBAL:{t_clean}"
+
+        return t_clean
+
     def _match_umo(self, target_umo: str, event) -> bool:
-        """匹配当前消息事件是否符合 target_umo 作用域规则（严格精确匹配，避免越权放大）"""
+        """匹配当前消息事件是否符合 target_umo 作用域规则（严格精确匹配）"""
         if not target_umo or not event:
             return True
 
@@ -204,7 +248,6 @@ class AIMemoPlugin(Star):
                 for tid in target_ids:
                     if tid.upper() in ["GLOBAL", "ALL", "*"]:
                         return True
-                    # 必须精确匹配群号、发送者或完整 UMO 字符串，不再盲目子串匹配 (已修复 Bug 5)
                     if group_id and group_id == tid:
                         return True
                     if sender_id and sender_id == tid:
@@ -225,7 +268,7 @@ class AIMemoPlugin(Star):
         logger.info(f"[InstantMemo] 配置已更新，当前触发模式为: {self.trigger_mode}")
 
     async def terminate(self):
-        """生命周期结束时，安全取消后台轮询协程防止报错 (修复为 async def)"""
+        """生命周期结束时，安全取消后台轮询协程防止报错 (async def)"""
         if hasattr(self, "poll_task") and self.poll_task and not self.poll_task.done():
             self.poll_task.cancel()
             try:
@@ -249,7 +292,7 @@ class AIMemoPlugin(Star):
         tasks_data = self.data.setdefault("tasks", {})
         self.data.setdefault("keyword_triggers", {})
 
-        # 重启后将卡在 generating 状态的任务自动复位为 pending (已修复 Bug 2)
+        # 重启后将卡在 generating 状态的任务自动复位为 pending
         for t_id, task in list(tasks_data.items()):
             if isinstance(task, dict) and task.get("status") == "generating":
                 task["status"] = "pending"
@@ -315,7 +358,7 @@ class AIMemoPlugin(Star):
         return items
 
     def _get_item_by_index(self, index_str: str, umo_key: str = "DEFAULT"):
-        """通过序号（如 1）或 8位/全量 UUID 获取备忘录/任务/搭话数据（隔离会话缓存，修复 Bug 9）"""
+        """通过序号（如 1）或 8位/全量 UUID 获取备忘录/任务/搭话数据（隔离会话缓存）"""
         sess_index = self._session_index_to_item.get(umo_key, {})
         if index_str in sess_index:
             item_type, key = sess_index[index_str]
@@ -368,8 +411,7 @@ class AIMemoPlugin(Star):
 
     @filter.command("memo")
     async def memo_cmd(self, event: AstrMessageEvent):
-        """备忘录、定时任务和关键词搭话管理指令（包含管理员鉴权保护，已修复安全中危 1）"""
-        # 管理员鉴权拦截
+        """备忘录、定时任务和关键词搭话管理指令（包含管理员鉴权保护）"""
         if not await self._check_is_admin(event):
             yield event.plain_result("❌ 权限不足：只有 Bot 管理员才能使用 /memo 管理指令。")
             return
@@ -386,7 +428,6 @@ class AIMemoPlugin(Star):
 
         if action in ["list", "show", "列出", "列表"]:
             items = self._get_all_items()
-            # 按会话隔离存储映射关系 (修复 Bug 9)
             self._session_index_to_item[umo_key] = {
                 str(i + 1): (item["type"], item["key"]) for i, item in enumerate(items)
             }
@@ -498,7 +539,7 @@ class AIMemoPlugin(Star):
                     try:
                         mins = int(val)
                         if mins <= 0:
-                            data["expire_timestamp"] = -1.0  # 修复 Bug 10：0 或 -1 代表永久有效
+                            data["expire_timestamp"] = -1.0
                             await self._save_data()
                             yield event.plain_result("✅ 已将状态备忘录时间修改为永久有效。")
                         else:
@@ -704,8 +745,8 @@ class AIMemoPlugin(Star):
         if not self._is_allowed(event, action_type, "status_memo"):
             return f"[后台提示] 操作已被配置拦截禁用。"
 
-        if is_global and not self.allow_global_memo:
-            is_global = False
+        default_umo = event.unified_msg_origin if event else ""
+        final_umo = self._resolve_target_umo(is_global, target_umo, default_umo)
 
         if not is_update:
             target_id = str(uuid.uuid4())
@@ -728,13 +769,6 @@ class AIMemoPlugin(Star):
             except ValueError:
                 expire_time = time.time() + 60 * 60
                 dur_info = "有效期 60 分钟"
-
-        final_umo = (target_umo or "").strip()
-        if not final_umo:
-            final_umo = "GLOBAL" if is_global else (event.unified_msg_origin if event else "GLOBAL")
-        elif is_global and not final_umo.upper().startswith("GLOBAL:"):
-            if final_umo.upper() != "GLOBAL":
-                final_umo = f"GLOBAL:{final_umo}"
 
         memos_data[target_id] = {
             "content": content,
@@ -817,14 +851,11 @@ class AIMemoPlugin(Star):
         is_update = target_id is not None
         action_type = "update" if is_update else "add"
 
-        # 校验 AI 权限与全局广播许可 (已修复 Bug 7 & 8)
         if not self._is_allowed(event, action_type, "task"):
             return f"[后台提示] 操作已被配置拦截禁用。"
 
-        if not self.allow_global_memo:
-            is_global = False
-            if target_umo and target_umo.upper().startswith("GLOBAL"):
-                target_umo = event.unified_msg_origin if event else ""
+        default_umo = event.unified_msg_origin if event else ""
+        final_umo = self._resolve_target_umo(is_global, target_umo, default_umo)
 
         if context_history_limit is None:
             context_history_limit = int(self.config.get("context_history_limit", 5))
@@ -889,13 +920,6 @@ class AIMemoPlugin(Star):
                 else:
                     return "错误：对于 interval 间隔循环，schedule_value 必须为整数代表间隔分钟（如 '60'）。"
 
-        final_umo = (target_umo or "").strip()
-        if not final_umo:
-            final_umo = "GLOBAL" if is_global else (event.unified_msg_origin if event else "GLOBAL")
-        elif is_global and not final_umo.upper().startswith("GLOBAL:"):
-            if final_umo.upper() != "GLOBAL":
-                final_umo = f"GLOBAL:{final_umo}"
-
         exact_msg = (exact_message_to_send or "").strip()
 
         tasks_data[target_id] = {
@@ -959,7 +983,7 @@ class AIMemoPlugin(Star):
         Args:
             task_description (string): 提醒任务描述或提醒内容。
             minutes_later (number): 多少分钟后进行提醒。
-            exact_message_to_send (string, optional): 选填，触发时要发送的具体消息（避免死参数，直接下发此消息）。
+            exact_message_to_send (string, optional): 选填，触发时要发送的具体消息。
         """
         return await self.set_scheduled_task(
             event=event,
@@ -1009,21 +1033,14 @@ class AIMemoPlugin(Star):
         if not self._is_allowed(event, action_type, "keyword_trigger"):
             return f"[后台提示] 操作已被配置拦截禁用。"
 
+        default_umo = event.unified_msg_origin if event else ""
+        final_umo = self._resolve_target_umo(is_global, target_umo, default_umo)
+
         if context_history_limit is None:
             context_history_limit = int(self.config.get("context_history_limit", 5))
 
         if not is_update:
             target_id = str(uuid.uuid4())
-
-        if is_global and not self.allow_global_memo:
-            is_global = False
-
-        final_umo = (target_umo or "").strip()
-        if not final_umo:
-            final_umo = "GLOBAL" if is_global else (event.unified_msg_origin if event else "GLOBAL")
-        elif is_global and not final_umo.upper().startswith("GLOBAL:"):
-            if final_umo.upper() != "GLOBAL":
-                final_umo = f"GLOBAL:{final_umo}"
 
         triggers_data[target_id] = {
             "keyword": keyword.strip(),
@@ -1085,8 +1102,9 @@ class AIMemoPlugin(Star):
             if req.func_tool.empty():
                 req.func_tool = None
 
-        # 群聊黑白名单过滤：不在许可群聊中的事件，不注入备忘录信息 (已修复机制缺陷 5)
-        if event and not self._is_allowed(event, "add", "status_memo"):
+        # 群聊黑白名单校验：仅进行纯粹的群黑白名单过滤，不与 ai_allow_add 权限误解耦 (已修复副作用)
+        group_id = event.get_group_id() if (event and hasattr(event, "get_group_id")) else None
+        if group_id and not self._is_group_allowed(group_id):
             return
 
         current_time = time.time()
@@ -1168,7 +1186,6 @@ class AIMemoPlugin(Star):
                 + "\n======================================="
             )
 
-        # 仅当有活跃备忘条目时才注入人设原则提示（节省无条目时的 Token 消耗，已修复机制缺陷 4）
         if memo_sections:
             privacy_instruction = (
                 "=== [核心备忘与人设原则] ===\n"
@@ -1365,8 +1382,13 @@ class AIMemoPlugin(Star):
         if not msg_str:
             return
 
-        # 若消息以指令前缀 '/' 或 'memo' 开头，绝对不拦截，避免阻断管理指令 (已修复 Bug 3)
+        # 若消息以指令前缀 '/' 或 'memo' 开头，绝对不拦截
         if msg_str.startswith("/") or msg_str.lower().startswith("memo"):
+            return
+
+        # 群聊黑白名单检查：非许可群聊中的发言不触发关键词搭话 (已补充修复 1)
+        group_id = event.get_group_id() if (event and hasattr(event, "get_group_id")) else None
+        if group_id and not self._is_group_allowed(group_id):
             return
 
         triggers = self.data.setdefault("keyword_triggers", {})
@@ -1602,7 +1624,6 @@ class AIMemoPlugin(Star):
         await self._save_data()
 
     async def _generate_task_message(self, task_id: str, task: dict):
-        # 若任务已经存在就绪消息 (如 set_active_reminder 传入的 exact_message_to_send)，则跳过生成 (已修复死参数)
         if task.get("generated_message") and task.get("status") == "ready":
             return
 
@@ -1664,6 +1685,21 @@ class AIMemoPlugin(Star):
             logger.error(f"[InstantMemo] 任务 {task_id} 动态内容渲染失败，重新调度: {e}")
             await self._reschedule_task(task_id, task)
 
+    def _extract_group_id_from_umo(self, umo_str: str) -> Optional[str]:
+        """从 UMO 提取群号"""
+        if not umo_str:
+            return None
+        m = re.search(r'GroupMessage:(\w+)', umo_str, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        if ":" in umo_str and not umo_str.upper().startswith("GLOBAL:"):
+            g = umo_str.split(":", 1)[0].strip()
+            if g.isdigit():
+                return g
+        if umo_str.isdigit():
+            return umo_str
+        return None
+
     async def _send_task_message(self, task_id: str, task: dict):
         umo = str(task.get("target_umo", "")).strip()
         msg_text = task.get("generated_message")
@@ -1672,7 +1708,6 @@ class AIMemoPlugin(Star):
             if msg_text:
                 msg = MessageChain().message(msg_text)
 
-                # 全局广播模式多会话下发逻辑 (已修复 Bug 1)
                 if not umo or umo.upper() == "GLOBAL" or umo.upper().startswith("GLOBAL:"):
                     target_user = None
                     if umo.upper().startswith("GLOBAL:"):
@@ -1683,6 +1718,11 @@ class AIMemoPlugin(Star):
                     conv_mgr = getattr(self.context, "conversation_manager", None)
                     if conv_mgr and hasattr(conv_mgr, "conversations"):
                         for s_umo in list(conv_mgr.conversations.keys()):
+                            # 校验会话中的群号是否符合黑白名单规则 (已补充修复 1)
+                            s_gid = self._extract_group_id_from_umo(s_umo)
+                            if s_gid and not self._is_group_allowed(s_gid):
+                                continue
+
                             if target_user:
                                 if target_user in s_umo:
                                     active_umos.append(s_umo)
@@ -1701,6 +1741,12 @@ class AIMemoPlugin(Star):
                         logger.info(f"[InstantMemo] 全局定时任务 {task_id} 已广播至 {sent_count} 个会话。")
 
                 else:
+                    # 校验单播目标群聊是否符合黑白名单规则 (已补充修复 1)
+                    gid = self._extract_group_id_from_umo(umo)
+                    if gid and not self._is_group_allowed(gid):
+                        logger.warning(f"[InstantMemo] 定时任务 {task_id} 目标群聊 {gid} 在黑名单中，取消发送。")
+                        return
+
                     await self.context.send_message(umo, msg)
                     logger.info(f"[InstantMemo] 定时任务 {task_id} 已成功发送至 {umo}")
 
@@ -1713,31 +1759,20 @@ class AIMemoPlugin(Star):
 
     def _is_allowed(self, event: AstrMessageEvent, action_type: str, item_type: str) -> bool:
         """
-        检查是否允许操作。
+        检查 AI 在当前事件中是否允许发起对应写操作（新增/修改/删除）。
         action_type: 'add', 'update', 'delete'
         item_type: 'status_memo', 'task', 'keyword_trigger'
         """
         if not event:
             return True
 
+        # 1. 验证群聊黑白名单限制
         group_id = event.get_group_id() if hasattr(event, "get_group_id") else None
-        if group_id:
-            group_str = str(group_id)
-            filter_mode = self.config.get("group_filter_mode", "all")
-            group_list_str = self.config.get("group_list", "")
+        if group_id and not self._is_group_allowed(group_id):
+            logger.warning(f"[InstantMemo] 群聊 {group_id} 不在白名单或在黑名单中，拒绝 AI {action_type} 操作。")
+            return False
 
-            configured_groups = set(re.split(r'[\s,，;；\n\r]+', group_list_str.strip()))
-            configured_groups = {g for g in configured_groups if g}
-
-            if filter_mode == "whitelist":
-                if group_str not in configured_groups:
-                    logger.warning(f"[InstantMemo] 群聊 {group_str} 不在白名单中，拒绝操作。")
-                    return False
-            elif filter_mode == "blacklist":
-                if group_str in configured_groups:
-                    logger.warning(f"[InstantMemo] 群聊 {group_str} 在黑名单中，拒绝操作。")
-                    return False
-
+        # 2. 验证操作权限开关
         if action_type == "add" and not self.config.get("ai_allow_add", True):
             logger.warning("[InstantMemo] AI 新增操作被禁用。")
             return False
@@ -1748,6 +1783,7 @@ class AIMemoPlugin(Star):
             logger.warning("[InstantMemo] AI 删除操作被禁用。")
             return False
 
+        # 3. 验证条目类型权限开关
         if item_type == "status_memo" and not self.config.get("enable_status_memo_ai", True):
             logger.warning("[InstantMemo] 状态备忘录已被 AI 禁用。")
             return False
@@ -1807,17 +1843,13 @@ class AIMemoPlugin(Star):
 
                 is_global = bool(req_data.get("is_global", False))
                 target_umo = req_data.get("target_umo", "").strip()
-                if not target_umo:
-                    target_umo = "GLOBAL"
-                elif is_global and not target_umo.upper().startswith("GLOBAL:"):
-                    if target_umo.upper() != "GLOBAL":
-                        target_umo = f"GLOBAL:{target_umo}"
+                final_umo = self._resolve_target_umo(is_global, target_umo, "GLOBAL")
 
                 memo_id = str(uuid.uuid4())
                 self.data.setdefault("status_memos", {})[memo_id] = {
                     "content": content,
                     "expire_timestamp": expire_time,
-                    "target_umo": target_umo,
+                    "target_umo": final_umo,
                 }
                 await self._save_data()
                 return jsonify({"status": "success", "id": memo_id})
@@ -1828,6 +1860,8 @@ class AIMemoPlugin(Star):
                 schedule_val = req_data.get("schedule_value", "").strip()
                 context_history_limit = int(req_data.get("context_history_limit", 5))
                 target_umo = req_data.get("target_umo", "GLOBAL").strip()
+                is_global = bool(req_data.get("is_global", False))
+                final_umo = self._resolve_target_umo(is_global, target_umo, "GLOBAL")
 
                 if task_type not in ["one_off", "daily", "workday", "interval"]:
                     return jsonify({"status": "error", "message": "Invalid task type"}), 400
@@ -1859,7 +1893,7 @@ class AIMemoPlugin(Star):
                 self.data.setdefault("tasks", {})[task_id] = {
                     "type": task_type,
                     "task_description": task_desc,
-                    "target_umo": target_umo,
+                    "target_umo": final_umo,
                     "context_history_limit": context_history_limit,
                     "scheduled_time": schedule_val,
                     "trigger_timestamp": trigger_time,
@@ -1876,12 +1910,13 @@ class AIMemoPlugin(Star):
                 context_history_limit = int(req_data.get("context_history_limit", 5))
                 target_umo = req_data.get("target_umo", "GLOBAL").strip()
                 is_global = bool(req_data.get("is_global", True))
+                final_umo = self._resolve_target_umo(is_global, target_umo, "GLOBAL")
 
                 trigger_id = str(uuid.uuid4())
                 self.data.setdefault("keyword_triggers", {})[trigger_id] = {
                     "keyword": keyword,
                     "task_description": task_desc,
-                    "target_umo": target_umo,
+                    "target_umo": final_umo,
                     "context_history_limit": context_history_limit,
                     "is_global": is_global,
                 }
