@@ -73,7 +73,7 @@ def get_next_workday_timestamp(time_str: str) -> float:
         
     return target_dt.timestamp()
 
-@register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.2")
+@register("astrbot_plugin_instant_memo", "kitsuneimomo", "AI自我备忘录与主动定时提醒插件", "1.3.1")
 class AIMemoPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -1218,6 +1218,96 @@ class AIMemoPlugin(Star):
                 event.stop_event()
                 break
 
+    async def _generate_with_framework_pipeline(self, umo: str, prompt: str, system_prompt: str, event: Optional[AstrMessageEvent] = None) -> str:
+        """
+        框架级通用 LLM 生成：广播触发所有已加载插件的 on_llm_request 事件钩子，
+        自动兼容任意第三方记忆插件注入（如 summary, mem0 等）和路由插件分流（如 smart_engine 等）。
+        """
+        provider_id = await self.context.get_current_chat_provider_id(umo=umo)
+        
+        # 0. 构造 MockEvent 防止定时任务因缺少 event 导致依赖 event 的插件报 None 错误
+        class MockMessageEvent:
+            def __init__(self, target_umo):
+                self.unified_msg_origin = target_umo
+                self._extra = {}
+            def get_extra(self, key, default=None):
+                return self._extra.get(key, default)
+            def set_extra(self, key, value):
+                self._extra[key] = value
+            def get_sender_id(self):
+                return "system"
+            def get_sender_name(self):
+                return "System"
+                
+        effective_event = event if event else MockMessageEvent(umo)
+        
+        # 1. 构造标准的 ProviderRequest
+        req = ProviderRequest(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            session_id=umo
+        )
+
+        # 2. 遍历所有加载的插件并广播 on_llm_request 事件
+        try:
+            star_instances = []
+            if hasattr(self.context, "star_map") and isinstance(self.context.star_map, dict):
+                star_instances = list(self.context.star_map.values())
+            elif hasattr(self.context, "plugin_manager") and hasattr(self.context.plugin_manager, "plugins"):
+                star_instances = list(self.context.plugin_manager.plugins.values())
+                
+            for star in star_instances:
+                if star is self:
+                    continue
+                    
+                # 特殊场景防护：如果插件实例含有 memory_service (如 summary 插件)，显式尝试直接注入
+                if hasattr(star, "memory_service") and hasattr(star.memory_service, "inject_memory_to_prompt"):
+                    try:
+                        await star.memory_service.inject_memory_to_prompt(umo, req)
+                    except Exception as me:
+                        logger.debug(f"[InstantMemo] 直连 memory_service 注入跳过: {me}")
+
+                for attr_name in dir(star):
+                    if attr_name.startswith("_"):
+                        continue
+                    try:
+                        method = getattr(star, attr_name)
+                        if callable(method):
+                            is_hook = False
+                            if hasattr(method, "__event_type__") and getattr(method, "__event_type__") == "on_llm_request":
+                                is_hook = True
+                            elif hasattr(method, "_filter") and getattr(method, "_filter") == "on_llm_request":
+                                is_hook = True
+                            elif hasattr(method, "__name__") and "on_llm_request" in method.__name__:
+                                is_hook = True
+                            elif attr_name in ["inject_memory_to_prompt", "on_llm_request"]:
+                                is_hook = True
+
+                            if is_hook:
+                                if asyncio.iscoroutinefunction(method):
+                                    await method(effective_event, req)
+                                else:
+                                    method(effective_event, req)
+                    except Exception as ex:
+                        logger.debug(f"[InstantMemo] 分发 on_llm_request 至 {star}.{attr_name} 跳过: {ex}")
+        except Exception as e:
+            logger.warning(f"[InstantMemo] 广播在 on_llm_request 插件链上失败: {e}")
+
+        # 3. 发起包含已修改系统提示词与路由参数的 LLM 请求
+        target_provider = getattr(req, "provider_id", None) or provider_id
+        target_model = getattr(req, "model", None)
+        
+        kwargs = {
+            "chat_provider_id": target_provider,
+            "prompt": req.prompt,
+            "system_prompt": req.system_prompt
+        }
+        if target_model:
+            kwargs["model"] = target_model
+
+        llm_resp = await self.context.llm_generate(**kwargs)
+        return llm_resp.completion_text.strip().strip('"').strip("'")
+
     async def _execute_keyword_trigger(self, event: AstrMessageEvent, trigger: dict):
         umo = event.unified_msg_origin
         desc = trigger["task_description"]
@@ -1229,8 +1319,6 @@ class AIMemoPlugin(Star):
             if history_limit > 0:
                 history_contexts = await self._get_umo_history(umo, history_limit)
                 
-            provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-            
             system_prompt = (
                 f"你是一个智能搭话助手。当前有对话者发送的消息中触发了预设搭话关键词 '{keyword}'。\n"
                 f"你的本次插话任务要求：{desc}\n"
@@ -1247,13 +1335,13 @@ class AIMemoPlugin(Star):
                 prompt += "\n"
             prompt += "请生成要发送的原话消息正文："
             
-            llm_resp = await self.context.llm_generate(
-                chat_provider_id=provider_id,
+            generated_text = await self._generate_with_framework_pipeline(
+                umo=umo,
                 prompt=prompt,
-                system_prompt=system_prompt
+                system_prompt=system_prompt,
+                event=event
             )
             
-            generated_text = llm_resp.completion_text.strip().strip('"').strip("'")
             if generated_text:
                 msg = MessageChain().message(generated_text)
                 await self.context.send_message(umo, msg)
@@ -1344,8 +1432,6 @@ class AIMemoPlugin(Star):
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    provider_id = await self.context.get_current_chat_provider_id(umo=umo)
-                    
                     system_prompt = (
                         "你是一个定时任务消息处理器。\n"
                         "目标：请你根据【计划描述和人设目标】以及【最新会话历史记录】（如果有），生成一段即将主动推送给该用户的自然问候或计划内容文本。\n"
@@ -1361,13 +1447,11 @@ class AIMemoPlugin(Star):
                         prompt += "\n"
                     prompt += "请生成最合适的、将直接推送的原话正文："
                     
-                    llm_resp = await self.context.llm_generate(
-                        chat_provider_id=provider_id,
+                    generated_text = await self._generate_with_framework_pipeline(
+                        umo=umo,
                         prompt=prompt,
                         system_prompt=system_prompt
                     )
-                    
-                    generated_text = llm_resp.completion_text.strip().strip('"').strip("'")
                     
                     if not generated_text or (generated_text == desc and len(desc) > 10):
                         raise ValueError("生成文本为空或与任务描述完全一致，可能未正确生成")

@@ -612,8 +612,8 @@ async function init() {
                                 <td><span class="status-badge ${badgeClass}">${remainingStr}</span></td>
                                 <td>
                                     <div class="actions-cell">
-                                        <button class="btn btn-edit edit-memo-btn" data-id="${key}">编辑</button>
-                                        <button class="btn btn-danger delete-memo-btn" data-id="${key}">删除</button>
+                                        <button class="btn btn-edit edit-memo-btn" data-id="${escapeHtml(key)}">编辑</button>
+                                        <button class="btn btn-danger delete-memo-btn" data-id="${escapeHtml(key)}">删除</button>
                                     </div>
                                 </td>
                             </tr>
@@ -653,15 +653,15 @@ async function init() {
                         return `
                             <tr>
                                 <td class="cell-wrap">${escapeHtml(task.task_description)}</td>
-                                <td><span class="type-indicator">${typeCN[task.type] || task.type}</span></td>
-                                <td>${schedValueDisplay}</td>
-                                <td>${nextRunDisplay}</td>
+                                <td><span class="type-indicator">${escapeHtml(typeCN[task.type] || task.type)}</span></td>
+                                <td>${escapeHtml(schedValueDisplay)}</td>
+                                <td>${escapeHtml(nextRunDisplay)}</td>
                                 <td>${escapeHtml(formatScopeDisplay(task.target_umo))}</td>
-                                <td><span class="status-badge ${task.status}">${statusCN[task.status] || task.status}</span></td>
+                                <td><span class="status-badge ${escapeHtml(task.status)}">${escapeHtml(statusCN[task.status] || task.status)}</span></td>
                                 <td>
                                     <div class="actions-cell">
-                                        <button class="btn btn-edit edit-task-btn" data-id="${key}">编辑</button>
-                                        <button class="btn btn-danger delete-task-btn" data-id="${key}">删除</button>
+                                        <button class="btn btn-edit edit-task-btn" data-id="${escapeHtml(key)}">编辑</button>
+                                        <button class="btn btn-danger delete-task-btn" data-id="${escapeHtml(key)}">删除</button>
                                     </div>
                                 </td>
                             </tr>
@@ -691,8 +691,8 @@ async function init() {
                                 <td>${trigger.context_history_limit || 5} 条</td>
                                 <td>
                                     <div class="actions-cell">
-                                        <button class="btn btn-edit edit-trigger-btn" data-id="${key}">编辑</button>
-                                        <button class="btn btn-danger delete-trigger-btn" data-id="${key}">删除</button>
+                                        <button class="btn btn-edit edit-trigger-btn" data-id="${escapeHtml(key)}">编辑</button>
+                                        <button class="btn btn-danger delete-trigger-btn" data-id="${escapeHtml(key)}">删除</button>
                                     </div>
                                 </td>
                             </tr>
