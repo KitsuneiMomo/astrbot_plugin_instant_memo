@@ -72,6 +72,14 @@
 | `allow_global_memo` | `bool` | `true` | 是否允许创建全局生效的备忘录。 |
 | `group_filter_mode` | `string` | `all` | 群聊启用模式：`all` (全部群聊启用) / `whitelist` (仅白名单启用) / `blacklist` (黑名单禁用)。 |
 | `group_list` | `string` | `""` | 目标群号列表，用逗号、空格或换行分隔。 |
+| `image_render_enabled` | `bool` | `false` | 是否让 `/memo list` 优先发送图片。默认关闭，保持旧版纯文字行为；渲染/发送失败会自动回退文字。 |
+| `image_cache_enabled` | `bool` | `true` | 是否复用内容未变化的缓存图片。缓存位于插件数据目录的 `image_cache/`。 |
+| `image_cache_max_mb` | `int` | `32` | 图片缓存容量上限（MB），超出后按最旧文件淘汰。 |
+| `image_cache_ttl_hours` | `int` | `168` | 图片缓存有效期（小时），填 `0` 表示不按时间过期。 |
+| `image_style_version` | `string` | `"1"` | 图片样式版本；修改模板/样式后递增即可让旧缓存失效。 |
+| `image_scale_level` | `string` | `high` | 图片清晰度：`normal` (1.0x) / `high` (1.3x，默认) / `ultra` (1.8x)。等级越高文字越锐利，渲染稍慢、图片稍大。 |
+| `image_max_items` | `int` | `50` | 图片最多展示的条目数，超出时提示使用文字模式查看完整列表。 |
+| `image_item_max_chars` | `int` | `160` | 图片中单条内容的最大字符数，超出自动截断。 |
 
 ---
 
@@ -105,8 +113,15 @@ AI 可以注册关键词监听器，当群聊或私聊中出现指定关键词�
 | 指令 | 说明 |
 | :--- | :--- |
 | `/memo` 或 `/memo list` | 列出所有备忘录、定时任务与搭话监听器 |
+| `/memo list text` | 强制使用纯文字列表（图片渲染开启时也适用，便于查看未截断的完整内容） |
 | `/memo del <序号>` | 删除指定的条目 |
 | `/memo edit <序号> <属性> <新值>` | 修改指定条目的属性 |
+
+> 图片渲染默认关闭。开启 `image_render_enabled` 后，`/memo list` 会优先发送图片；图片渲染、图片发送或缓存读写失败时会自动回退到上表描述的原文字输出，并记录 warning 日志。
+>
+> 图片沿用原有的卡片版式（浅灰页面底 + 白色圆角卡片）。为保证清晰度，默认使用无损 PNG 截图，并要求渲染服务按设备像素比缩放（`scale=device` + `device_scale_factor_level`），默认 `high`（1.3x）；如需在手机端进一步看清小字，可把 `image_scale_level` 调为 `ultra`（1.8x）。清晰度等级会参与缓存 key，修改后旧图自动失效。
+>
+> 截图高度随内容自适应：渲染选项把视口高度压到 1px（`viewport_height`），full-page 截图的高度就只由内容决定。否则渲染服务的默认 720px 视口会在条目被删减后留下底部空白。
 
 **可修改属性：**
 - **状态备忘录**：`content`（内容）、`expire`（过期时间/分钟，0表示永久）、`global`（是否全局）

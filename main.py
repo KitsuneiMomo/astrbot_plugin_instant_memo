@@ -2,6 +2,7 @@ import json
 import os
 import time
 import asyncio
+import tempfile
 import uuid
 import re
 from datetime import datetime, timedelta
@@ -12,6 +13,27 @@ from astrbot.api.all import *
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import StarTools
+
+try:
+    from .memo_image import (
+        IMAGE_CACHE_SUBDIR,
+        MemoImageCache,
+        MemoImageError,
+        build_memo_view,
+        detect_image_suffix,
+        image_cache_key,
+        render_memo_image,
+    )
+except ImportError:  # 兼容以单文件方式加载 / 本地测试
+    from memo_image import (
+        IMAGE_CACHE_SUBDIR,
+        MemoImageCache,
+        MemoImageError,
+        build_memo_view,
+        detect_image_suffix,
+        image_cache_key,
+        render_memo_image,
+    )
 
 
 def get_next_daily_timestamp(time_str: str) -> float:
@@ -126,6 +148,12 @@ class AIMemoPlugin(Star):
         self.data = {}
         self._load_data()
 
+        # 图片渲染与缓存（默认关闭图片渲染，保持旧版纯文字输出）
+        self.image_render_enabled = self._config_bool("image_render_enabled", False)
+        self.image_cache_enabled = self._config_bool("image_cache_enabled", True)
+        self._transient_images = set()
+        self.image_cache = self._build_image_cache()
+
         # 启动后台异步轮询任务
         self.poll_task = asyncio.create_task(self._polling_loop())
 
@@ -214,6 +242,63 @@ class AIMemoPlugin(Star):
 
         return False
 
+    def _config_bool(self, key: str, default: bool = False) -> bool:
+        """兼容 WebUI / JSON 中可能以字符串形式保存的布尔配置。"""
+        value = self.config.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in ["1", "true", "yes", "y", "on", "是", "开启"]
+        return bool(value)
+
+    def _config_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _build_image_cache(self) -> MemoImageCache:
+        """缓存目录固定在插件数据目录，不写死系统临时目录。"""
+        cache_dir = os.path.join(self.data_dir, IMAGE_CACHE_SUBDIR)
+        max_mb = max(1, min(1024, self._config_int("image_cache_max_mb", 32)))
+        ttl_hours = max(0, min(24 * 365, self._config_int("image_cache_ttl_hours", 168)))
+        cache = MemoImageCache(
+            cache_dir,
+            max_bytes=max_mb * 1024 * 1024,
+            ttl_seconds=ttl_hours * 3600,
+            enabled=self.image_cache_enabled,
+            log=logger.warning,
+        )
+        cache.cleanup()
+        return cache
+
+    def _write_transient_image(self, data: bytes) -> str:
+        """缓存关闭时，仍把图片写到插件数据目录，避免系统临时目录不可写。"""
+        cache_dir = os.path.join(self.data_dir, IMAGE_CACHE_SUBDIR)
+        os.makedirs(cache_dir, exist_ok=True)
+        suffix = detect_image_suffix(data)
+        fd, path = tempfile.mkstemp(prefix="render-", suffix=suffix, dir=cache_dir)
+        try:
+            with os.fdopen(fd, "wb") as image_file:
+                fd = None
+                image_file.write(data)
+                image_file.flush()
+                os.fsync(image_file.fileno())
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self._transient_images.add(path)
+        return path
+
+    def _remove_transient_image(self, path: str) -> None:
+        self._transient_images.discard(path)
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            logger.warning(f"[InstantMemo] 清理临时图片失败: {e}")
+
     def on_config_update(self, config: dict):
         """热更新插件配置"""
         if config and config is not self.config:
@@ -222,6 +307,9 @@ class AIMemoPlugin(Star):
         self.poll_interval = int(self.config.get("poll_interval", 15))
         self.allow_global_memo = bool(self.config.get("allow_global_memo", True))
         self.trigger_mode = self.config.get("trigger_mode", "tool")
+        self.image_render_enabled = self._config_bool("image_render_enabled", False)
+        self.image_cache_enabled = self._config_bool("image_cache_enabled", True)
+        self.image_cache = self._build_image_cache()
         logger.info(f"[InstantMemo] 配置已更新，当前触发模式为: {self.trigger_mode}")
 
     async def terminate(self):
@@ -232,6 +320,8 @@ class AIMemoPlugin(Star):
                 await self.poll_task
             except asyncio.CancelledError:
                 pass
+        for path in list(getattr(self, "_transient_images", set())):
+            self._remove_transient_image(path)
 
     def _load_data(self):
         """加载 JSON 数据 (初始化时同步加载)"""
@@ -366,6 +456,143 @@ class AIMemoPlugin(Star):
                 return True
         return False
 
+    def _format_memo_list_text(self, items: list) -> str:
+        """原 /memo list 的纯文字输出，保持与旧版本完全一致。"""
+        memos = []
+        tasks = []
+        triggers = []
+
+        for i, item in enumerate(items):
+            idx_str = f"[{i + 1}]"
+            data = item["data"]
+            key = item["key"]
+            short_id = key[:8]
+
+            if item["type"] == "status_memo":
+                exp_t = data.get("expire_timestamp", 0)
+                if exp_t <= 0:
+                    remaining_str = "永久有效"
+                else:
+                    remaining = int((exp_t - time.time()) / 60)
+                    remaining_str = f"{remaining} 分钟后过期" if remaining > 0 else "已过期"
+                scope = "全局" if data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
+                memos.append(f"{idx_str} ID: {short_id} | 内容: {data.get('content')} ({remaining_str}, {scope})")
+
+            elif item["type"] == "task":
+                t_type = data.get("type", "one_off")
+                type_cn = {"one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "间隔"}
+                trigger_t = data.get("trigger_timestamp", 0)
+                time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
+                status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪", "failed": "失败"}
+                tasks.append(
+                    f"{idx_str} ID: {short_id} | [{type_cn.get(t_type, t_type)}] 描述: {data.get('task_description')} (下一次触发: {time_str}, 状态: {status_cn.get(data.get('status'), '未知')})"
+                )
+
+            elif item["type"] == "keyword_trigger":
+                scope = "全局" if data.get("is_global") or data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
+                triggers.append(
+                    f"{idx_str} ID: {short_id} | 关键词: \"{data.get('keyword')}\" -> 设定: {data.get('task_description')} ({scope})"
+                )
+
+        result_parts = ["📋 === AI 备忘录/任务/监听 列表 ==="]
+        if memos:
+            result_parts.append("📌 【临时人设/状态备忘录】\n" + "\n".join(memos))
+        if tasks:
+            result_parts.append("⏰ 【定时提醒与周期计划】\n" + "\n".join(tasks))
+        if triggers:
+            result_parts.append("🔑 【关键词主动监听搭话】\n" + "\n".join(triggers))
+
+        result_parts.append("\n💡 提示：使用 `/memo del <序号>` 删除条目，`/memo edit <序号> <属性> <新值>` 修改属性。")
+        return "\n\n".join(result_parts)
+
+    async def _memo_list_result(self, event: AstrMessageEvent, items: list, text_output: str, force_text: bool = False):
+        """优先返回图片消息；渲染/缓存/发送任一环节失败时返回原文字消息。"""
+        if force_text or not self.image_render_enabled:
+            return event.plain_result(text_output)
+
+        try:
+            view = build_memo_view(items, self.config)
+            image_path, is_transient = await self._get_memo_image_path(view, event)
+        except Exception as e:
+            logger.warning(f"[InstantMemo] 图片准备失败，回退文字输出: {e}")
+            return event.plain_result(text_output)
+
+        if not image_path:
+            return event.plain_result(text_output)
+
+        try:
+            await event.send(MessageChain().file_image(image_path))
+            # 图片已直接发送，返回空结果并终止本条命令的后续传播。
+            try:
+                return event.make_result().stop_event()
+            except AttributeError:
+                event.stop_event()
+                return None
+        except Exception as e:
+            logger.warning(f"[InstantMemo] 图片发送失败，回退文字输出: {e}")
+            return event.plain_result(text_output)
+        finally:
+            if is_transient:
+                self._remove_transient_image(image_path)
+
+    def _build_image_renderer(self, event=None):
+        """优先使用 Star.html_render，以遵循会话级 t2i_endpoint 配置。"""
+        html_render = getattr(self, "html_render", None)
+        if callable(html_render):
+            umo = getattr(event, "unified_msg_origin", None) if event is not None else None
+
+            async def _renderer(template, data, options=None):
+                return await html_render(
+                    template,
+                    data,
+                    return_url=False,
+                    options=options,
+                    umo=umo,
+                )
+
+            return _renderer
+        return getattr(self.context, "html_renderer", None)
+
+    async def _get_memo_image_path(self, view: dict, event=None) -> tuple:
+        """返回 (图片路径, 是否为临时文件)；失败时返回 (None, False)。"""
+        cache_key = image_cache_key(view, self.config)
+        cache = self.image_cache
+
+        if cache and cache.enabled:
+            try:
+                cached_path = cache.get(cache_key)
+            except Exception as e:
+                logger.warning(f"[InstantMemo] 图片缓存读取失败，回退文字输出: {e}")
+                return None, False
+            if cached_path:
+                return cached_path, False
+
+        try:
+            renderer = self._build_image_renderer(event)
+            if renderer is None:
+                raise MemoImageError("当前 AstrBot 未提供图片渲染器")
+            image_bytes = await render_memo_image(view, self.config, renderer=renderer)
+        except Exception as e:
+            logger.warning(f"[InstantMemo] 图片渲染失败，回退文字输出: {e}")
+            return None, False
+
+        if cache and cache.enabled:
+            try:
+                image_path = cache.put(cache_key, image_bytes)
+            except Exception as e:
+                logger.warning(f"[InstantMemo] 图片缓存写入失败，回退文字输出: {e}")
+                return None, False
+            if not image_path:
+                logger.warning("[InstantMemo] 图片缓存写入未返回路径，回退文字输出")
+                return None, False
+            return image_path, False
+
+        try:
+            return self._write_transient_image(image_bytes), True
+        except Exception as e:
+            logger.warning(f"[InstantMemo] 临时图片写入失败，回退文字输出: {e}")
+            return None, False
+
     @filter.command("memo")
     async def memo_cmd(self, event: AstrMessageEvent):
         """备忘录、定时任务和关键词搭话管理指令（包含管理员鉴权保护，已修复安全中危 1）"""
@@ -395,52 +622,12 @@ class AIMemoPlugin(Star):
                 yield event.plain_result("🍵 目前没有任何备忘录、定时任务或关键词搭话。")
                 return
 
-            memos = []
-            tasks = []
-            triggers = []
-
-            for i, item in enumerate(items):
-                idx_str = f"[{i + 1}]"
-                data = item["data"]
-                key = item["key"]
-                short_id = key[:8]
-
-                if item["type"] == "status_memo":
-                    exp_t = data.get("expire_timestamp", 0)
-                    if exp_t <= 0:
-                        remaining_str = "永久有效"
-                    else:
-                        remaining = int((exp_t - time.time()) / 60)
-                        remaining_str = f"{remaining} 分钟后过期" if remaining > 0 else "已过期"
-                    scope = "全局" if data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
-                    memos.append(f"{idx_str} ID: {short_id} | 内容: {data.get('content')} ({remaining_str}, {scope})")
-
-                elif item["type"] == "task":
-                    t_type = data.get("type", "one_off")
-                    type_cn = {"one_off": "单次", "daily": "每日", "workday": "工作日", "interval": "间隔"}
-                    trigger_t = data.get("trigger_timestamp", 0)
-                    time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trigger_t))
-                    status_cn = {"pending": "等待生成", "generating": "正在生成", "ready": "就绪", "failed": "失败"}
-                    tasks.append(
-                        f"{idx_str} ID: {short_id} | [{type_cn.get(t_type, t_type)}] 描述: {data.get('task_description')} (下一次触发: {time_str}, 状态: {status_cn.get(data.get('status'), '未知')})"
-                    )
-
-                elif item["type"] == "keyword_trigger":
-                    scope = "全局" if data.get("is_global") or data.get("target_umo") == "GLOBAL" else f"作用域: {data.get('target_umo', '当前会话')}"
-                    triggers.append(
-                        f"{idx_str} ID: {short_id} | 关键词: \"{data.get('keyword')}\" -> 设定: {data.get('task_description')} ({scope})"
-                    )
-
-            result_parts = ["📋 === AI 备忘录/任务/监听 列表 ==="]
-            if memos:
-                result_parts.append("📌 【临时人设/状态备忘录】\n" + "\n".join(memos))
-            if tasks:
-                result_parts.append("⏰ 【定时提醒与周期计划】\n" + "\n".join(tasks))
-            if triggers:
-                result_parts.append("🔑 【关键词主动监听搭话】\n" + "\n".join(triggers))
-
-            result_parts.append("\n💡 提示：使用 `/memo del <序号>` 删除条目，`/memo edit <序号> <属性> <新值>` 修改属性。")
-            yield event.plain_result("\n\n".join(result_parts))
+            # 原文字输出始终保留，作为图片失败时的唯一 fallback。
+            text_output = self._format_memo_list_text(items)
+            force_text = len(parts) > 1 and parts[1].strip().lower() in ["text", "plain", "文字", "纯文本"]
+            result = await self._memo_list_result(event, items, text_output, force_text=force_text)
+            if result is not None:
+                yield result
             return
 
         elif action in ["del", "delete", "删除", "remove", "rm"]:
